@@ -22,8 +22,11 @@ describe("api → invoke mapping", () => {
     await api.clipSetFades("id", 10, 20);
     await api.clipSetTransition("id", { type: "DipToBlack", ms: 300 });
     await api.clipSetVolume("id", 0.5, true);
-    await api.musicSet(null);
-    await api.cacheThumbnails("cid");
+    await api.overlayAdd("/l.png", 100, 1);
+    await api.overlaySetPlacement("o", { scale: 0.5, x: 0.1, y: 0.2 });
+    await api.audioClipAdd("t", "/m.m4a", 250);
+    await api.audioClipSet("c", 0.5, 1, 2, false);
+    await api.cacheThumbnails("/v.mp4", 5000);
     await api.exportStart({ destination: "/o.mp4", quality: "High", audio_only: false });
     await api.jobCancel("j");
     await api.ffmpegStatus();
@@ -37,20 +40,45 @@ describe("api → invoke mapping", () => {
       ["clip_set_fades", { id: "id", fadeIn: 10, fadeOut: 20 }],
       ["clip_set_transition", { id: "id", transition: { type: "DipToBlack", ms: 300 } }],
       ["clip_set_volume", { id: "id", volume: 0.5, muted: true }],
-      ["music_set", { path: null }],
-      ["cache_thumbnails", { clipId: "cid" }],
+      ["overlay_add", { path: "/l.png", at: 100, layer: 1 }],
+      ["overlay_set_placement", { id: "o", placement: { scale: 0.5, x: 0.1, y: 0.2 } }],
+      ["audio_clip_add", { trackId: "t", path: "/m.m4a", at: 250 }],
+      ["audio_clip_set", { id: "c", volume: 0.5, fadeIn: 1, fadeOut: 2, muted: false }],
+      ["cache_thumbnails", { path: "/v.mp4", durationMs: 5000 }],
       ["export_start", { settings: { destination: "/o.mp4", quality: "High", audio_only: false } }],
       ["job_cancel", { jobId: "j" }],
       ["ffmpeg_status"],
     ]);
   });
 
+  it("rounds float milliseconds so Rust's integer args never reject a playhead from the video clock", async () => {
+    await api.clipSplit("id", 1516.6666666666667);
+    await api.audioClipSplit("id", 1516.6666666666667);
+    await api.overlaySplit("id", 0.4);
+    await api.clipTrim("id", 999.5, 4000.49);
+    await api.overlayMove("o", 2999.999, 1);
+    await api.audioClipAdd("t", "/m.m4a", 250.2);
+    expect(invoke.mock.calls.map((c) => c[1])).toEqual([
+      { id: "id", at: 1517 }, { id: "id", at: 1517 }, { id: "id", at: 0 },
+      { id: "id", sourceStart: 1000, sourceEnd: 4000 }, { id: "o", at: 3000, layer: 1 }, { trackId: "t", path: "/m.m4a", at: 250 },
+    ]);
+  });
+
   it("covers every remaining command once", async () => {
-    await api.projectGet(); await api.projectOpen("/p"); await api.setAspect("Square1x1"); await api.setCrop({ scale: 2, x: 0, y: 1 });
-    await api.mediaImport("/v.mp4"); await api.clipDelete("id"); await api.musicUpdate({ source: "/m", duration_ms: 1, timeline_start: 0, trim_start: 0, trim_end: 1, volume: 1, fade_in: 0, fade_out: 0, muted: false });
+    await api.projectGet(); await api.projectOpen("/p"); await api.setAspect("Square1x1"); await api.setCrop({ scale: 2, x: 0, y: 1 }); await api.setVideoMuted(true);
+    await api.mediaImport("/v.mp4"); await api.clipDelete("id"); await api.clipInsert("/v.mp4", 0);
+    await api.poolAdd("/a"); await api.poolRemove("p");
+    await api.overlayMove("o", 1, 0); await api.overlayLayerAdd(); await api.overlayLayerRemove(1); await api.overlayTrim("o", 0, 1); await api.overlaySplit("o", 1); await api.overlayDelete("o"); await api.overlaySetFades("o", 1, 2);
+    await api.audioTrackAdd("SFX"); await api.audioTrackUpdate("t", "x", true); await api.audioTrackRemove("t");
+    await api.audioClipMove("c", "t", 1); await api.audioClipTrim("c", 0, 1); await api.audioClipSplit("c", 1); await api.audioClipDelete("c");
     await api.cacheWaveform("/v.mp4"); await api.exportPlan({ destination: "/o", quality: "Draft", audio_only: true });
     expect(invoke.mock.calls.map((c) => c[0])).toEqual([
-      "project_get", "project_open", "project_set_aspect", "project_set_crop", "media_import", "clip_delete", "music_update", "cache_waveform", "export_plan",
+      "project_get", "project_open", "project_set_aspect", "project_set_crop", "project_set_video_muted", "media_import", "clip_delete", "clip_insert",
+      "pool_add", "pool_remove",
+      "overlay_move", "overlay_layer_add", "overlay_layer_remove", "overlay_trim", "overlay_split", "overlay_delete", "overlay_set_fades",
+      "audio_track_add", "audio_track_update", "audio_track_remove",
+      "audio_clip_move", "audio_clip_trim", "audio_clip_split", "audio_clip_delete",
+      "cache_waveform", "export_plan",
     ]);
   });
 

@@ -15,7 +15,15 @@ export interface MediaInfo {
   audio_codec: string | null;
   sample_rate: number | null;
   rotation: number;
+  /** Still image (png/jpeg/webp): no intrinsic duration, no audio. */
+  is_still: boolean;
 }
+
+export type MediaKind = "Video" | "Audio" | "Image";
+export const mediaKind = (m: MediaInfo): MediaKind => (m.is_still ? "Image" : m.width > 0 ? "Video" : "Audio");
+
+/** Length a still gets when first placed on the overlay track. */
+export const STILL_DEFAULT_MS: Ms = 5000;
 
 export type AspectPreset = "YouTube16x9" | "Shorts9x16" | "Square1x1" | "LinkedIn4x5";
 
@@ -47,17 +55,48 @@ export interface Clip {
   transition_out: Transition;
 }
 
-export interface AudioTrack {
+/** Where an overlay sits: scale = overlay width / output width, x/y = normalized centre. */
+export interface Placement { scale: number; x: number; y: number }
+export const PLACEMENT_FULL: Placement = { scale: 1, x: 0.5, y: 0.5 };
+export const PLACEMENT_BADGE: Placement = { scale: 0.35, x: 0.85, y: 0.85 };
+
+/** Overlay (V2) clip: free-positioned, silent, composited above V1. */
+export interface OverlayClip {
+  id: string;
   source: string;
-  duration_ms: Ms;
+  media: MediaInfo;
+  source_start: Ms;
+  source_end: Ms;
   timeline_start: Ms;
-  trim_start: Ms;
-  trim_end: Ms;
+  fade_in: Ms;
+  fade_out: Ms;
+  placement: Placement;
+  /** Overlay row: 0 = V2, 1 = V3, … Higher layers composite on top. */
+  layer: number;
+}
+
+export interface AudioClip {
+  id: string;
+  source: string;
+  media: MediaInfo;
+  source_start: Ms;
+  source_end: Ms;
+  timeline_start: Ms;
   volume: number;
   fade_in: Ms;
   fade_out: Ms;
   muted: boolean;
 }
+
+export interface AudioTrack {
+  id: string;
+  label: string;
+  muted: boolean;
+  clips: AudioClip[];
+}
+export const TRACK_LABEL_PRESETS = ["Music", "SFX", "Narration", "Other"] as const;
+
+export interface PoolItem { id: string; path: string; media: MediaInfo }
 
 export interface Project {
   version: number;
@@ -66,7 +105,13 @@ export interface Project {
   aspect: AspectPreset;
   crop: Crop;
   clips: Clip[];
-  music: AudioTrack | null;
+  overlays: OverlayClip[];
+  /** Number of overlay rows shown (≥ 1). */
+  overlay_layers: number;
+  /** Track-level mute for V1. */
+  video_muted: boolean;
+  audio_tracks: AudioTrack[];
+  pool: PoolItem[];
   fps: Rational | null;
 }
 
@@ -88,7 +133,9 @@ export interface JobProgress { job_id: string; kind: string; progress: number; m
 export interface JobDone { job_id: string; kind: string; result: { destination: string; strategy: Strategy } }
 export interface JobError { job_id: string; kind: string; error: string }
 
-export const clipDuration = (c: Clip): Ms => c.source_end - c.source_start;
+/** Works for V1, overlay and audio clips alike. */
+export const clipDuration = (c: { source_start: Ms; source_end: Ms }): Ms => c.source_end - c.source_start;
+export const clipEnd = (c: { timeline_start: Ms; source_start: Ms; source_end: Ms }): Ms => c.timeline_start + clipDuration(c);
 export const projectDuration = (p: Project): Ms => {
   const last = p.clips[p.clips.length - 1];
   return last ? last.timeline_start + clipDuration(last) : 0;

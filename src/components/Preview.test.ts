@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { clip, media, music, project, resolveWith, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, clip, media, overlay, project, resolveWith, stillMedia, type MockApi } from "../test/fixtures";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -37,8 +37,8 @@ beforeEach(() => { for (const v of Object.values(api)) if (typeof v === "functio
 describe("Preview", () => {
   it("shows the empty state with the feature list when there is no clip", async () => {
     const { w } = await setup(project([]));
-    expect(w.text()).toContain("Drop a video here");
-    expect(w.text()).toContain("Trim · Split · Fade · Dissolve · Music · Aspect · Export");
+    expect(w.text()).toContain("Drop a video or image here");
+    expect(w.text()).toContain("Trim · Split · Fade · Dissolve · Overlays · Audio tracks · Aspect · Export");
     expect(w.find("video").exists()).toBe(false);
   });
 
@@ -136,7 +136,8 @@ describe("Preview", () => {
   });
 
   it("play/pause drives the media elements and rewinds from the end", async () => {
-    const { store, w } = await setup(project([clip({ id: "a" })], { music: music() }));
+    const ac = audioClip({ id: "ac1", source: "/audio/bed.m4a", source_end: 20000 });
+    const { store, w } = await setup(project([clip({ id: "a" })], { audio_tracks: [audioTrack([ac])] }));
     await w.vm.$nextTick();
     const video = w.find("video").element as HTMLVideoElement;
     const audio = w.find("audio").element as HTMLAudioElement;
@@ -160,6 +161,104 @@ describe("Preview", () => {
     await flush();
     expect(video.volume).toBeCloseTo(0.3, 5);
     store.playhead = 6000;
+    await flush();
+    expect(video.volume).toBe(0);
+  });
+
+  it("mounts one <audio> per active audio clip, muting silent ones", async () => {
+    const a1 = audioClip({ id: "a1", source: "/audio/one.m4a", timeline_start: 0, source_end: 3000, volume: 0.4 });
+    const a2 = audioClip({ id: "a2", source: "/audio/two.m4a", timeline_start: 2000, source_end: 2000 });
+    const { store, w } = await setup(project([clip({ id: "a" })], { audio_tracks: [audioTrack([a1], { id: "t1" }), audioTrack([a2], { id: "t2", muted: true })] }));
+    store.playhead = 1000;
+    await flush();
+    expect(w.findAll("[data-testid=audio-clip]")).toHaveLength(1);
+    store.playhead = 2500;
+    await flush();
+    const els = w.findAll("[data-testid=audio-clip]").map((e) => e.element as HTMLAudioElement);
+    expect(els.map((e) => e.getAttribute("src"))).toEqual(["asset://localhost/audio/one.m4a", "asset://localhost/audio/two.m4a"]);
+    expect(els[0].volume).toBeCloseTo(0.4);
+    expect(els[1].volume).toBe(0);
+    store.playhead = 4500;
+    await flush();
+    expect(w.findAll("[data-testid=audio-clip]")).toHaveLength(0);
+  });
+
+  it("layers the current overlay with its placement and fades, and drags it when selected", async () => {
+    vi.useFakeTimers();
+    const ov = overlay({ id: "ov1", media: stillMedia(), timeline_start: 1000, source_end: 2000, fade_in: 500, placement: { scale: 0.5, x: 0.5, y: 0.5 } });
+    const { store, w } = await setup(project([clip({ id: "a" })], { overlays: [ov] }));
+    store.playhead = 0;
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=overlay-layer]").exists()).toBe(false);
+    store.playhead = 1250;
+    await w.vm.$nextTick();
+    const layer = w.find("[data-testid=overlay-layer]");
+    expect(layer.element.tagName).toBe("IMG");
+    // frame is 800×450; overlay half the width, 400×300 source → 400×300 px, centred
+    expect(px(layer.attributes("style")!.match(/width: ([\d.]+)px/)![1])).toBeCloseTo(400, 0);
+    expect(px(layer.attributes("style")!.match(/left: ([\d.]+)px/)![1])).toBeCloseTo(200, 0);
+    expect(layer.attributes("style")).toContain("opacity: 0.5");
+    // not selected: dragging the frame moves the crop, not the overlay
+    const frame = w.find(".cursor-grab");
+    await frame.trigger("pointerdown", { clientX: 100, clientY: 100, pointerId: 1 });
+    await frame.trigger("pointermove", { clientX: 140, clientY: 100 });
+    await frame.trigger("pointerup");
+    expect(api.setCrop).toHaveBeenCalledTimes(1);
+    expect(api.overlaySetPlacement).not.toHaveBeenCalled();
+    // selected: the same drag places the overlay (80 px right of an 800 px frame = +0.1)
+    store.select({ kind: "overlay", id: "ov1" });
+    await w.vm.$nextTick();
+    await frame.trigger("pointerdown", { clientX: 100, clientY: 100, pointerId: 1 });
+    await frame.trigger("pointermove", { clientX: 180, clientY: 145 });
+    await frame.trigger("pointerup");
+    expect(api.overlaySetPlacement).toHaveBeenCalledWith("ov1", { scale: 0.5, x: expect.closeTo(0.6, 3), y: expect.closeTo(0.6, 3) });
+    expect(api.setCrop).toHaveBeenCalledTimes(1);
+    await frame.trigger("wheel", { deltaY: -100 });
+    vi.advanceTimersByTime(250);
+    expect(api.overlaySetPlacement).toHaveBeenLastCalledWith("ov1", expect.objectContaining({ scale: expect.closeTo(0.525, 3) }));
+    vi.useRealTimers();
+  });
+
+  it("stacks every overlay under the playhead in layer order", async () => {
+    const lo = overlay({ id: "lo", media: stillMedia(), timeline_start: 0, source_end: 3000, layer: 0 });
+    const hi = overlay({ id: "hi", media: stillMedia(), timeline_start: 1000, source_end: 3000, layer: 1, placement: { scale: 0.2, x: 0.1, y: 0.1 } });
+    const { store, w } = await setup(project([clip({ id: "a" })], { overlays: [lo, hi], overlay_layers: 2 }));
+    store.playhead = 500;
+    await w.vm.$nextTick();
+    expect(w.findAll("[data-testid=overlay-layer]")).toHaveLength(1);
+    store.playhead = 1500;
+    await w.vm.$nextTick();
+    const layers = w.findAll("[data-testid=overlay-layer]");
+    expect(layers).toHaveLength(2);
+    expect(px(layers[1].attributes("style")!.match(/width: ([\d.]+)px/)![1])).toBeCloseTo(160, 0);
+  });
+
+  it("plays a still on V1 with a wall-clock, no <video>, then moves to the next clip", async () => {
+    vi.useFakeTimers();
+    const card = clip({ id: "card", source: "/images/title.png", media: stillMedia(), source_end: 1000 });
+    const { store, w } = await setup(project([card, clip({ id: "b", source: "/v/b.mp4" })]));
+    store.playhead = 0;
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=still-layer]").attributes("src")).toBe("asset://localhost/images/title.png");
+    expect(w.find("video").exists()).toBe(false);
+    store.playing = true;
+    await vi.advanceTimersByTimeAsync(400);
+    expect(store.playhead).toBeGreaterThan(300);
+    expect(store.playhead).toBeLessThan(1000);
+    await vi.advanceTimersByTimeAsync(800);
+    expect(store.current?.clip.id).toBe("b");
+    expect(w.find("video").exists()).toBe(true);
+    store.playing = false;
+    vi.useRealTimers();
+  });
+
+  it("a muted video track silences the <video> even when the clip itself is not muted", async () => {
+    const { store, w } = await setup(project([clip({ id: "a", volume: 0.8 })]));
+    const video = w.find("video").element as HTMLVideoElement;
+    store.playhead = 100;
+    await flush();
+    expect(video.volume).toBeCloseTo(0.8);
+    store.project = { ...store.project!, video_muted: true };
     await flush();
     expect(video.volume).toBe(0);
   });

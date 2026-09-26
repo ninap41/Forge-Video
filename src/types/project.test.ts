@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ASPECT_PRESETS, clipDuration, projectDuration, transitionMs } from "./project";
+import { ASPECT_PRESETS, clipDuration, clipEnd, mediaKind, projectDuration, transitionMs } from "./project";
+import { audioMedia, media, overlay, stillMedia } from "../test/fixtures";
 import { clip, project } from "../test/fixtures";
 
 describe("aspect presets", () => {
@@ -28,5 +29,14 @@ describe("duration helpers", () => {
     expect(transitionMs({ type: "None" })).toBe(0);
     expect(transitionMs({ type: "CrossDissolve", ms: 750 })).toBe(750);
     expect(transitionMs({ type: "DipToBlack", ms: 300 })).toBe(300);
+  });
+
+  it("mediaKind and clipEnd cover video, audio and stills", () => {
+    expect(mediaKind(media())).toBe("Video");
+    expect(mediaKind(audioMedia())).toBe("Audio");
+    expect(mediaKind(stillMedia())).toBe("Image");
+    const o = overlay({ timeline_start: 1000, source_start: 250, source_end: 2250 });
+    expect(clipDuration(o)).toBe(2000);
+    expect(clipEnd(o)).toBe(3000);
   });
 });

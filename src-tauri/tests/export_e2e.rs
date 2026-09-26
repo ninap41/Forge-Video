@@ -53,9 +53,9 @@ async fn multi_clip_render_with_dissolve_music_and_vertical_crop() {
     p.aspect = AspectPreset::Shorts9x16;
     p.crop = Crop { scale: 1.3, x: 0.4, y: 0.5 };
     let m = fixture("music.m4a");
-    let mut music = AudioTrack::new(m.clone(), media::probe(&m).await.unwrap().duration_ms);
-    music.fade_out = 1000;
-    p.music = Some(music);
+    let t = timeline::audio_track_add(&mut p, "Music");
+    let mid = timeline::audio_clip_add(&mut p, t, AudioClip::new(m.clone(), media::probe(&m).await.unwrap()), 0).unwrap();
+    timeline::audio_clip_set(&mut p, mid, 0.5, 0, 1000, false).unwrap();
     assert_eq!(p.duration_ms(), 5500);
 
     let out = dir.path().join("render.mp4");
@@ -77,4 +77,48 @@ async fn multi_clip_render_with_dissolve_music_and_vertical_crop() {
     assert_eq!(ma.width, 0);
     assert!(ma.has_audio);
     assert!((5300..=5700).contains(&ma.duration_ms), "duration {}", ma.duration_ms);
+}
+
+#[tokio::test]
+async fn overlay_png_and_video_over_v1_with_two_audio_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = fixture("clip_a_720p.mp4");
+    let b = fixture("clip_b_1080p.mp4");
+    let logo = fixture("logo.png");
+    let m = fixture("music.m4a");
+    let mut p = Project::new("t");
+    timeline::append(&mut p, Clip::new(a.clone(), media::probe(&a).await.unwrap()));
+    let ida = p.clips[0].id;
+    timeline::trim(&mut p, ida, 0, 4000).unwrap();
+    // PNG badge for 500..3000 with fades, then a picture-in-picture video 2000..3500
+    let lo = timeline::overlay_add(&mut p, OverlayClip::new(logo.clone(), media::probe(&logo).await.unwrap()), 500, 0);
+    timeline::overlay_trim(&mut p, lo, 0, 2500).unwrap();
+    timeline::overlay_set_fades(&mut p, lo, 300, 300).unwrap();
+    let vo = timeline::overlay_add(&mut p, OverlayClip::new(b.clone(), media::probe(&b).await.unwrap()), 3000, 1);
+    timeline::overlay_trim(&mut p, vo, 1000, 2500).unwrap();
+    timeline::overlay_set_placement(&mut p, vo, Placement { scale: 0.4, x: 0.2, y: 0.2 }).unwrap();
+    assert_eq!(p.overlays.len(), 2);
+    assert_eq!(p.overlay_layers, 2);
+    // and a title card still on V1 in front of the footage
+    timeline::append(&mut p, Clip::new(logo.clone(), media::probe(&logo).await.unwrap()));
+    let card = p.clips[1].id;
+    timeline::trim(&mut p, card, 0, 1000).unwrap();
+    timeline::move_to(&mut p, card, 0).unwrap();
+    let music = timeline::audio_track_add(&mut p, "Music");
+    let sfx = timeline::audio_track_add(&mut p, "SFX");
+    let mm = media::probe(&m).await.unwrap();
+    timeline::audio_clip_add(&mut p, music, AudioClip::new(m.clone(), mm.clone()), 0).unwrap();
+    let s1 = timeline::audio_clip_add(&mut p, sfx, AudioClip::new(m.clone(), mm), 3000).unwrap();
+    timeline::audio_clip_trim(&mut p, s1, 0, 5000).unwrap();
+    assert_eq!(p.duration_ms(), 5000);
+
+    let out = dir.path().join("overlay.mp4");
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false };
+    let plan = run(&p, &s).await;
+    assert_eq!(plan.strategy, Strategy::HardwareEncode);
+    assert_eq!(plan.reasons, vec!["2 clips on the timeline"], "multiple V1 clips short-circuit the blocker list");
+    let mi = media::probe(&out).await.unwrap();
+    assert_eq!((mi.width, mi.height), (1920, 1080));
+    assert!(mi.has_audio);
+    assert!((4800..=5200).contains(&mi.duration_ms), "audio must not extend past V1: {}", mi.duration_ms);
 }

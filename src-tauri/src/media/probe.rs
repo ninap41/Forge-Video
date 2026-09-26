@@ -1,7 +1,7 @@
 //! `ffprobe` wrapper: turns a media file into `MediaInfo`.
 
 use crate::error::{Error, Result};
-use crate::project::{MediaInfo, Rational};
+use crate::project::{MediaInfo, Rational, STILL_DEFAULT_MS};
 use crate::render::ffmpeg::ffprobe_bin;
 use serde::Deserialize;
 use std::path::Path;
@@ -58,6 +58,22 @@ pub fn parse_probe_json(json: &str) -> Result<MediaInfo> {
     let video = out.streams.iter().find(|s| s.codec_type.as_deref() == Some("video"));
     let audio = out.streams.iter().find(|s| s.codec_type.as_deref() == Some("audio"));
     let fmt = out.format.as_ref();
+    if let Some(v) = video.filter(|v| is_still(v, fmt)) {
+        // A still image: no intrinsic duration, no audio. Gets a default on-screen length.
+        return Ok(MediaInfo {
+            duration_ms: STILL_DEFAULT_MS,
+            width: v.width.unwrap_or(0),
+            height: v.height.unwrap_or(0),
+            fps: Rational { num: 0, den: 1 },
+            codec: v.codec_name.clone().unwrap_or_default(),
+            container: fmt.and_then(|f| f.format_name.clone()).unwrap_or_default(),
+            has_audio: false,
+            audio_codec: None,
+            sample_rate: None,
+            rotation: 0,
+            is_still: true,
+        });
+    }
     let duration_ms = fmt
         .and_then(|f| f.duration.as_deref())
         .and_then(parse_secs_to_ms)
@@ -81,7 +97,16 @@ pub fn parse_probe_json(json: &str) -> Result<MediaInfo> {
         audio_codec: audio.and_then(|a| a.codec_name.clone()),
         sample_rate: audio.and_then(|a| a.sample_rate.as_deref()).and_then(|s| s.parse().ok()),
         rotation: video.map(rotation_of).unwrap_or(0),
+        is_still: false,
     })
+}
+
+const STILL_CODECS: &[&str] = &["png", "mjpeg", "webp", "bmp", "tiff", "gif"];
+
+fn is_still(v: &Stream, fmt: Option<&Format>) -> bool {
+    let codec_still = v.codec_name.as_deref().is_some_and(|c| STILL_CODECS.contains(&c));
+    let fmt_still = fmt.and_then(|f| f.format_name.as_deref()).is_some_and(|f| f.ends_with("_pipe") || f == "image2");
+    codec_still || fmt_still
 }
 
 pub async fn probe(path: &Path) -> Result<MediaInfo> {
@@ -94,6 +119,33 @@ pub async fn probe(path: &Path) -> Result<MediaInfo> {
         return Err(Error::Media(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
     parse_probe_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(test)]
+mod still_tests {
+    use super::*;
+
+    #[test]
+    fn png_probe_is_a_still_with_default_length() {
+        let j = r#"{"streams":[{"codec_type":"video","codec_name":"png","width":400,"height":300,"pix_fmt":"rgba"}],
+            "format":{"format_name":"png_pipe"}}"#;
+        let m = parse_probe_json(j).unwrap();
+        assert!(m.is_still);
+        assert_eq!(m.duration_ms, STILL_DEFAULT_MS);
+        assert_eq!((m.width, m.height), (400, 300));
+        assert!(!m.has_audio);
+        assert_eq!(m.kind(), crate::project::MediaKind::Image);
+        // an mjpeg *video* with a duration is not a still
+        let j = r#"{"streams":[{"codec_type":"video","codec_name":"h264","width":4,"height":4}],"format":{"format_name":"mov,mp4","duration":"2"}}"#;
+        assert!(!parse_probe_json(j).unwrap().is_still);
+    }
+
+    #[tokio::test]
+    async fn probes_png_fixture() {
+        let m = probe(&crate::test_util::fixture("logo.png")).await.unwrap();
+        assert!(m.is_still);
+        assert_eq!((m.width, m.height), (128, 128));
+    }
 }
 
 #[cfg(test)]

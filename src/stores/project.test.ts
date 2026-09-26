@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { baseProject, clip, media, music, project, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, baseProject, clip, fakeSplit, media, overlay, poolItem, project, stillMedia, type MockApi } from "../test/fixtures";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -18,7 +18,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(() => {
   setActivePinia(createPinia());
   for (const v of Object.values(api)) if (typeof v === "function" && "mockClear" in v) (v as ReturnType<typeof vi.fn>).mockClear();
-  api.cacheThumbnails.mockImplementation(() => Promise.resolve({ clip_id: "x", interval_ms: 200, files: ["/t/0001.jpg", "/t/0002.jpg"] }));
+  api.cacheThumbnails.mockImplementation(() => Promise.resolve({ path: "x", interval_ms: 200, files: ["/t/0001.jpg", "/t/0002.jpg"] }));
   api.cacheWaveform.mockImplementation(() => Promise.resolve({ bucket_ms: 10, peaks: [1, 2, 3] }));
 });
 
@@ -116,8 +116,22 @@ describe("mutations", () => {
     expect(s.selectedClipId).toBe("n2");
     expect(s.dirty).toBe(true);
     await flush();
-    expect(api.cacheThumbnails).toHaveBeenCalledWith("n1");
-    expect(api.cacheThumbnails).toHaveBeenCalledWith("n2");
+    expect(api.cacheThumbnails).toHaveBeenCalledWith(after2.clips[0].source, 5000);
+    expect(api.cacheThumbnails).toHaveBeenCalledWith(after2.clips[1].source, 5000);
+  });
+
+  it("importMedia does not select anything when the file went to the pool only", async () => {
+    const s = useProjectStore();
+    await s.load();
+    await flush();
+    const withPool = { ...baseProject(), pool: [poolItem({ media: stillMedia(), path: "/images/logo.png" })] };
+    api.mediaImport.mockImplementationOnce(() => Promise.resolve(withPool));
+    await s.importMedia(["/images/logo.png"]);
+    expect(s.selected).toBeNull();
+    expect(s.pool).toHaveLength(1);
+    await flush();
+    expect(api.cacheThumbnails).toHaveBeenCalledWith("/images/logo.png", 5000);
+    expect(api.cacheWaveform).toHaveBeenCalledTimes(2); // no waveform for a still
   });
 
   it("errors are captured on the store instead of throwing, and busy flags reset", async () => {
@@ -151,6 +165,96 @@ describe("mutations", () => {
     const s = useProjectStore();
     await s.splitAtPlayhead();
     expect(api.clipSplit).not.toHaveBeenCalled();
+    expect(s.error).toBe("Nothing to split");
+  });
+
+  it("⌘T really splits the clip under the playhead into two contiguous halves", async () => {
+    const s = useProjectStore();
+    api.clipSplit.mockImplementation((id: string, at: number) => Promise.resolve(fakeSplit(s.project!, id, at)));
+    await s.load();
+    const before = s.duration;
+    s.select("a");
+    s.playhead = 2000;
+    await s.splitAtPlayhead();
+    expect(s.error).toBeNull();
+    expect(s.clips.map((c) => c.id)).toEqual(["a", "a-split", "b"]);
+    const [left, right, b] = s.clips;
+    expect([left.source_start, left.source_end]).toEqual([0, 2000]);
+    expect([right.source_start, right.source_end]).toEqual([2000, 5000]);
+    expect(right.source).toBe(left.source);
+    expect([left.timeline_start, right.timeline_start, b.timeline_start]).toEqual([0, 2000, 5000]);
+    expect(s.duration).toBe(before);
+    expect(s.selected).toEqual({ kind: "clip", id: "a-split" });
+    expect(s.dirty).toBe(true);
+    // split the new half again: three pieces of "a"
+    s.playhead = 3500;
+    await s.splitAtPlayhead();
+    expect(s.clips.map((c) => [c.id, c.source_start, c.source_end])).toEqual([
+      ["a", 0, 2000], ["a-split", 2000, 3500], ["a-split-split", 3500, 5000], ["b", 0, 4000],
+    ]);
+    expect(s.duration).toBe(before);
+  });
+
+  it("⌘T with a float playhead (from the video clock) still reaches Rust as a whole number", async () => {
+    const s = useProjectStore();
+    api.clipSplit.mockImplementation((id: string, at: number) => Promise.resolve(fakeSplit(s.project!, id, Math.round(at))));
+    await s.load();
+    s.playhead = 1516.6666666666667;
+    await s.splitAtPlayhead();
+    expect(api.clipSplit).toHaveBeenCalledWith("a", 1516.6666666666667);
+    expect(s.clips.map((c) => [c.source_start, c.source_end])).toEqual([[0, 1517], [1517, 5000], [0, 4000]]);
+    expect(s.error).toBeNull();
+  });
+
+  it("⌘T uses the clip under the playhead even when another V1 clip is selected", async () => {
+    const s = useProjectStore();
+    api.clipSplit.mockImplementation((id: string, at: number) => Promise.resolve(fakeSplit(s.project!, id, at)));
+    await s.load();
+    s.select("a");
+    s.playhead = 7000; // inside b (5000..9000)
+    await s.splitAtPlayhead();
+    expect(api.clipSplit).toHaveBeenCalledWith("b", 7000);
+    expect(s.clips.map((c) => [c.id, c.timeline_start])).toEqual([["a", 0], ["b", 5000], ["b-split", 7000]]);
+  });
+
+  it("⌘T on a selected overlay/audio clip that is not under the playhead falls back to V1", async () => {
+    const s = useProjectStore();
+    const ov = overlay({ id: "ov1", timeline_start: 6000, source_end: 2000 });
+    const ac = audioClip({ id: "ac1", timeline_start: 6000, source_end: 2000 });
+    const p = { ...baseProject(), overlays: [ov], audio_tracks: [audioTrack([ac], { id: "t1" })] };
+    api.projectGet.mockImplementationOnce(() => Promise.resolve(p));
+    api.clipSplit.mockImplementation((id: string, at: number) => Promise.resolve(fakeSplit(s.project!, id, at)));
+    await s.load();
+    s.select({ kind: "overlay", id: "ov1" });
+    s.playhead = 2000;
+    await s.splitAtPlayhead();
+    expect(api.overlaySplit).not.toHaveBeenCalled();
+    expect(api.clipSplit).toHaveBeenCalledWith("a", 2000);
+    expect(s.clips).toHaveLength(3);
+    s.select({ kind: "audio", id: "ac1", trackId: "t1" });
+    s.playhead = 7000;
+    await s.splitAtPlayhead();
+    expect(api.audioClipSplit).toHaveBeenCalledWith("ac1", 7000);
+  });
+
+  it("⌘T at a clip boundary reports a clear error instead of calling Rust", async () => {
+    const s = useProjectStore();
+    await s.load();
+    s.playhead = 0;
+    await s.splitAtPlayhead();
+    expect(api.clipSplit).not.toHaveBeenCalled();
+    expect(s.error).toBe("Move the playhead inside a clip to split it");
+    s.playhead = 5000; // exactly where b starts: not inside a, and at b's left edge
+    await s.splitAtPlayhead();
+    expect(api.clipSplit).not.toHaveBeenCalled();
+    // Rust rejections still land on the store's error field
+    s.playhead = 4950;
+    api.clipSplit.mockImplementationOnce(() => Promise.reject("invalid edit: split would create a clip that is too short"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await s.splitAtPlayhead();
+    spy.mockRestore();
+    expect(s.error).toContain("too short");
+    expect(s.clips).toHaveLength(2);
   });
 
   it("forwards the simple edits with their arguments", async () => {
@@ -163,7 +267,8 @@ describe("mutations", () => {
     await s.setVolume("a", 0.2, true);
     await s.setAspect("Shorts9x16");
     await s.setCrop({ scale: 2, x: 0.1, y: 0.9 });
-    await s.updateMusic(music({ volume: 0.9 }));
+    await s.setVideoMuted(true);
+    expect(api.setVideoMuted).toHaveBeenCalledWith(true);
     expect(api.clipTrim).toHaveBeenCalledWith("a", 100, 2000);
     expect(api.clipMove).toHaveBeenCalledWith("a", 1);
     expect(api.clipSetFades).toHaveBeenCalledWith("a", 10, 20);
@@ -171,24 +276,118 @@ describe("mutations", () => {
     expect(api.clipSetVolume).toHaveBeenCalledWith("a", 0.2, true);
     expect(api.setAspect).toHaveBeenCalledWith("Shorts9x16");
     expect(api.setCrop).toHaveBeenCalledWith({ scale: 2, x: 0.1, y: 0.9 });
-    expect(api.musicUpdate).toHaveBeenCalledWith(expect.objectContaining({ volume: 0.9 }));
     expect(s.dirty).toBe(true);
   });
 
-  it("setMusic fetches the bed's waveform once", async () => {
+  it("forwards overlay, audio-track and pool edits", async () => {
     const s = useProjectStore();
-    const withMusic = project([clip({ id: "a" })], { music: music() });
-    api.musicSet.mockImplementation(() => Promise.resolve(withMusic));
-    await s.setMusic("/audio/bed.m4a");
+    await s.load();
+    await s.overlayMove("o", 100, 1); await s.overlayLayerAdd(); await s.overlayLayerRemove(1); await s.overlayTrim("o", 0, 2000); await s.overlaySetFades("o", 1, 2);
+    await s.overlaySetPlacement("o", { scale: 0.5, x: 0.1, y: 0.2 });
+    await s.audioTrackAdd("SFX"); await s.audioTrackUpdate("t", "Narration", true); await s.audioTrackRemove("t");
+    await s.audioClipTrim("c", 1, 500); await s.audioClipSet("c", 0.5, 10, 20, true);
+    await s.poolAdd(["/a.mp3", "/b.png"]); await s.poolRemove("p"); await s.insertClip("/v.mp4", 1);
+    expect(api.overlayMove).toHaveBeenCalledWith("o", 100, 1);
+    expect(api.overlayLayerAdd).toHaveBeenCalled();
+    expect(api.overlayLayerRemove).toHaveBeenCalledWith(1);
+    expect(api.overlayTrim).toHaveBeenCalledWith("o", 0, 2000);
+    expect(api.overlaySetFades).toHaveBeenCalledWith("o", 1, 2);
+    expect(api.overlaySetPlacement).toHaveBeenCalledWith("o", { scale: 0.5, x: 0.1, y: 0.2 });
+    expect(api.audioTrackAdd).toHaveBeenCalledWith("SFX");
+    expect(api.audioTrackUpdate).toHaveBeenCalledWith("t", "Narration", true);
+    expect(api.audioTrackRemove).toHaveBeenCalledWith("t");
+    expect(api.audioClipTrim).toHaveBeenCalledWith("c", 1, 500);
+    expect(api.audioClipSet).toHaveBeenCalledWith("c", 0.5, 10, 20, true);
+    expect(api.poolAdd.mock.calls).toEqual([["/a.mp3"], ["/b.png"]]);
+    expect(api.poolRemove).toHaveBeenCalledWith("p");
+    expect(api.clipInsert).toHaveBeenCalledWith("/v.mp4", 1);
+    expect(s.dirty).toBe(true);
+  });
+
+  it("overlayAdd / audioClipAdd select what was placed and cache its media", async () => {
+    const s = useProjectStore();
+    await s.load();
+    const ov = overlay({ id: "ov1", timeline_start: 1000, source: "/images/logo.png" });
+    api.overlayAdd.mockImplementationOnce(() => Promise.resolve(project([clip({ id: "a" })], { overlays: [ov] })));
+    await s.overlayAdd("/images/logo.png", 1000);
+    expect(api.overlayAdd).toHaveBeenCalledWith("/images/logo.png", 1000, 0);
+    expect(s.selected).toEqual({ kind: "overlay", id: "ov1" });
+    expect(s.selectedOverlay?.id).toBe("ov1");
+    const ac = audioClip({ id: "ac1", timeline_start: 500, source: "/audio/bed.m4a" });
+    const track = audioTrack([ac], { id: "t1" });
+    api.audioClipAdd.mockImplementationOnce(() => Promise.resolve(project([clip({ id: "a" })], { audio_tracks: [track] })));
+    await s.audioClipAdd("t1", "/audio/bed.m4a", 500);
+    expect(api.audioClipAdd).toHaveBeenCalledWith("t1", "/audio/bed.m4a", 500);
+    expect(s.selected).toEqual({ kind: "audio", id: "ac1", trackId: "t1" });
+    expect(s.selectedAudio?.track.label).toBe("Music");
     await flush();
-    expect(api.musicSet).toHaveBeenCalledWith("/audio/bed.m4a");
-    expect(s.waveforms["/audio/bed.m4a"]).toEqual([1, 2, 3]);
-    await s.setMusic("/audio/bed.m4a");
+    expect(api.cacheWaveform).toHaveBeenCalledWith("/audio/bed.m4a");
+    expect(api.cacheThumbnails).not.toHaveBeenCalledWith("/audio/bed.m4a", expect.anything());
+  });
+
+  it("currentOverlays and activeAudioClips follow the playhead and resolve track mute", async () => {
+    const s = useProjectStore();
+    const ov = overlay({ id: "ov1", timeline_start: 1000, source_end: 2000 });
+    const ov2 = overlay({ id: "ov2", timeline_start: 2600, source_end: 1000, layer: 1 });
+    const a1 = audioClip({ id: "a1", timeline_start: 0, source_end: 3000 });
+    const a2 = audioClip({ id: "a2", timeline_start: 2500, source_end: 1000, source_start: 0 });
+    const p = project([clip({ id: "a" })], { overlays: [ov, ov2], overlay_layers: 2, audio_tracks: [audioTrack([a1], { id: "t1" }), audioTrack([a2], { id: "t2", muted: true })] });
+    api.projectGet.mockImplementationOnce(() => Promise.resolve(p));
+    await s.load();
+    expect(s.overlayLayers).toBe(2);
+    s.playhead = 500;
+    expect(s.currentOverlays).toEqual([]);
+    expect(s.activeAudioClips.map((x) => x.clip.id)).toEqual(["a1"]);
+    s.playhead = 2700;
+    expect(s.currentOverlays.map((o) => [o.clip.id, o.sourceMs])).toEqual([["ov1", 1700], ["ov2", 100]]);
+    expect(s.activeAudioClips.map((x) => [x.clip.id, x.silent, x.sourceMs])).toEqual([["a1", false, 2700], ["a2", true, 200]]);
+    s.playhead = 3700;
+    expect(s.currentOverlays).toEqual([]);
+  });
+
+  it("splitAtPlayhead and deleteSelected dispatch on the selection kind", async () => {
+    const s = useProjectStore();
+    const ov = overlay({ id: "ov1", timeline_start: 0, source_end: 4000 });
+    const ac = audioClip({ id: "ac1", timeline_start: 0, source_end: 4000 });
+    const p = project([clip({ id: "a" })], { overlays: [ov], audio_tracks: [audioTrack([ac], { id: "t1" })] });
+    api.projectGet.mockImplementationOnce(() => Promise.resolve(p));
+    await s.load();
+    s.playhead = 2000;
+    s.select({ kind: "overlay", id: "ov1" });
+    const afterOv = project([clip({ id: "a" })], { overlays: [{ ...ov, source_end: 2000 }, overlay({ id: "ov2", timeline_start: 2000, source_start: 2000, source_end: 4000 })], audio_tracks: p.audio_tracks });
+    api.overlaySplit.mockImplementationOnce(() => Promise.resolve({ project: afterOv, new_id: "ov2" }));
+    await s.splitAtPlayhead();
+    expect(api.overlaySplit).toHaveBeenCalledWith("ov1", 2000);
+    expect(api.clipSplit).not.toHaveBeenCalled();
+    expect(s.selected).toEqual({ kind: "overlay", id: "ov2" });
+    s.select({ kind: "audio", id: "ac1", trackId: "t1" });
+    api.audioClipSplit.mockImplementationOnce(() => Promise.resolve({ project: afterOv, new_id: "zzz" }));
+    await s.splitAtPlayhead();
+    expect(api.audioClipSplit).toHaveBeenCalledWith("ac1", 2000);
+    expect(s.selected).toBeNull(); // the new id is not in the echoed project, so the selection is dropped
+    s.select({ kind: "audio", id: "ac1", trackId: "t1" });
+    await s.deleteSelected();
+    expect(api.audioClipDelete).toHaveBeenCalledWith("ac1");
+    s.select({ kind: "overlay", id: "ov1" });
+    await s.deleteSelected();
+    expect(api.overlayDelete).toHaveBeenCalledWith("ov1");
+    s.select("a");
+    await s.deleteSelected();
+    expect(api.clipDelete).toHaveBeenCalledWith("a");
+  });
+
+  it("poolView and timelineHeight persist to localStorage", async () => {
+    const s = useProjectStore();
+    s.poolView = "list";
+    s.timelineHeight = 420;
     await flush();
-    expect(api.cacheWaveform).toHaveBeenCalledTimes(1);
-    api.musicSet.mockImplementation(() => Promise.resolve(base));
-    await s.setMusic(null);
-    expect(s.project?.music).toBeNull();
+    expect(localStorage.getItem("forgevideo.poolView")).toBe("list");
+    expect(localStorage.getItem("forgevideo.timelineHeight")).toBe("420");
+    setActivePinia(createPinia());
+    const s2 = useProjectStore();
+    expect(s2.poolView).toBe("list");
+    expect(s2.timelineHeight).toBe(420);
+    localStorage.clear();
   });
 
   it("save clears dirty only on success; open and newProject reset dirty", async () => {
