@@ -1,10 +1,48 @@
 # ForgeVideo
 
-A deliberately tiny Mac video editor: trim, split, reorder, ripple, fade, cross dissolve, one music
-track, aspect presets (YouTube 16:9, Shorts 9:16, Square, LinkedIn 4:5) with reposition, and fast
-H.264 export through Apple VideoToolbox. Editing never touches media; the timeline is metadata.
+A deliberately tiny Mac video editor: a ripple-edited main track, overlay layers for logos and
+composite shots, labelled audio tracks, a media pool, trim / split / fade / cross dissolve, aspect
+presets (YouTube 16:9, Shorts 9:16, Square, LinkedIn 4:5) with reposition, and fast H.264 export
+through Apple VideoToolbox. Editing never touches media; the timeline is metadata.
 
 Stack: Vue 3 + TypeScript + Pinia + Tailwind → Tauri 2 → Rust → `ffmpeg`/`ffprobe` subprocesses.
+
+## Features
+
+**Media pool** — the section under the timeline. Every imported file lives here, in Clips / Audio /
+Images tabs, as thumbnails or a list (your choice is remembered). Add files with **Import…**, **⌘I**,
+the per-tab Import button, or by dropping them anywhere in the window. Drag an item onto a track to
+place it at that time, or double-click to place it at the playhead. Accepted: mp4, mov, m4v, mkv,
+webm, avi, mts, m2ts · mp3, m4a, aac, wav, aiff, flac · png, jpg, jpeg, webp.
+
+**V1 · video** — the main track. Always contiguous: trimming or deleting ripples everything after.
+Video *or still images* (a still defaults to 5 s and stretches as far as you drag it). Per clip:
+frame-snapped trim handles, drag to reorder, fade in/out, volume and mute, and Cut / Cross dissolve /
+Dip to black into the next clip. The speaker icon in the gutter mutes the whole track.
+
+**V2, V3, … · overlay layers** — composited above V1 for logos, lower-thirds, B-roll and
+picture-in-picture. Clips are free-positioned and silent; each layer keeps its clips from overlapping
+(a clip you drop pushes what it lands on). Select an overlay and drag it in the preview to place it,
+scroll to resize; PNGs start as a small bottom-right badge, video starts full-frame. Fade in/out per
+clip. **+ Layer** in the gutter adds a row; ✕ removes one.
+
+**Audio tracks** — as many as you like, each with a label (Music, SFX, Narration, Other, or your own
+text; click it to rename) and a track mute. Clips are free-positioned, can be dragged between tracks,
+and have volume, fade in/out and mute. Everything is mixed under the video audio and trimmed to the
+video length on export.
+
+**Split** the selected clip at the playhead with **⌘T**, on any track. The left half keeps its id;
+fades and transitions move to the outer ends.
+
+**Preview** mirrors the export: crop math, fades, dissolve opacity, every overlay layer, and every
+audio clip under the playhead. Drag the timeline's top edge to resize it.
+
+**Export (⌘E)** stream-copies when a single untouched clip already matches the preset, otherwise
+re-encodes with `h264_videotoolbox` (Draft / Standard / High) and tells you why. Audio-only `.m4a`
+for podcasts. Progress, cancel, Reveal in Finder.
+
+**Projects** are pretty JSON `.forgevideo` files with media paths stored relative to the project
+folder. Files saved before audio tracks existed load their music bed as one "Music" track.
 
 ## How rendering works
 
@@ -142,7 +180,12 @@ npm test && npm run build && (cd src-tauri && cargo test)
 ## Layout
 
 - `src/` Vue UI. `src/api/tauri.ts` is the only place that calls Rust.
-- `src-tauri/src/project` model + JSON persistence · `timeline` pure edit ops · `media` ffprobe ·
+- `src/components/`: `Timeline.vue` (rows, gutter, drags, pool drops) · `MediaPool.vue` ·
+  `ClipBlock.vue` (V1) and `FreeBlock.vue` (overlay + audio clips) · `Preview.vue` · `Inspector.vue`
+  · `MuteToggle.vue` (green speaker = audio on).
+- `src-tauri/src/project` model + JSON persistence (v1 → v2 migration) · `timeline` pure edit ops
+  (`relayout` keeps V1 contiguous and free lanes non-overlapping) · `media` ffprobe (stills get a
+  default length) ·
   `cache` thumbnails/waveforms in `~/Library/Caches/ForgeVideo` · `render` export planner + ffmpeg
   filter graph · `jobs` background jobs + progress events · `capture` reserved for recording (Phase 3).
 - `src-tauri/vendor/wry/` is a local copy of wry 0.55.1 with one fix in `src/wkwebview/drag_drop.rs`:
@@ -170,3 +213,18 @@ Press **?** or click the **?** button at the right of the toolbar to see this li
 | Esc | Close dialog |
 
 The table is generated from `SHORTCUTS` in `src/components/HelpDialog.vue`; keep them in sync.
+
+### Mouse
+
+| Gesture | Action |
+|---|---|
+| Drag clip edge | Trim in / out point (frame-snapped) |
+| Drag V1 clip | Reorder clips |
+| Drag overlay / audio clip | Move it in time, or to another layer / track |
+| Drag from media pool | Place on a track at that time |
+| Double-click pool item | Place it at the playhead |
+| Click ruler / drag | Scrub the playhead |
+| Drag preview | Reposition the crop, or place the selected overlay |
+| Scroll on preview | Zoom the crop, or resize the selected overlay |
+| Drop media files | Add to the media pool |
+| Drag timeline top edge | Resize the timeline panel |
