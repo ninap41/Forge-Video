@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import logo from "./assets/logo.svg";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { open, save, ask } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -80,7 +81,8 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); unlistenDr
 <template>
   <div class="h-full flex flex-col">
     <header class="h-11 shrink-0 flex items-center gap-1 px-3 border-b border-line bg-panel text-xs">
-      <span class="font-semibold text-sm mr-3 tracking-tight">Forge<span class="text-accent">Video</span></span>
+      <img :src="logo" alt="" class="h-7 w-auto mr-1.5 select-none" draggable="false" />
+      <span class="font-display font-bold text-base mr-3 tracking-tight text-accent">ForgeVideo</span>
       <button class="px-2 py-1 rounded hover:bg-panel-2" @click="newProject">New</button>
       <button class="px-2 py-1 rounded hover:bg-panel-2" @click="openProject">Open</button>
       <button class="px-2 py-1 rounded hover:bg-panel-2" @click="saveProject(false)">Save{{ store.dirty ? ' •' : '' }}</button>
