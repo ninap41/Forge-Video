@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { clip, media, music, project, resolveWith, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, clip, media, overlay, project, resolveWith, stillMedia, type MockApi } from "../test/fixtures";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -9,8 +9,6 @@ vi.mock("../api/tauri", async () => {
 });
 import { api as apiModule } from "../api/tauri";
 const api = apiModule as unknown as MockApi;
-const dialogOpen = vi.fn();
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: (...a: unknown[]) => dialogOpen(...(a as [])) }));
 
 import Inspector from "./Inspector.vue";
 import { useProjectStore } from "../stores/project";
@@ -28,7 +26,7 @@ const mounted: ReturnType<typeof mount>[] = [];
 afterEach(() => { mounted.splice(0).forEach((w) => w.unmount()); });
 const byText = (w: ReturnType<typeof mount>, t: string) => w.findAll("button").find((b) => b.text().includes(t))!;
 
-beforeEach(() => { for (const v of Object.values(api)) if (typeof v === "function" && "mockClear" in v) (v as ReturnType<typeof vi.fn>).mockClear(); dialogOpen.mockReset(); });
+beforeEach(() => { for (const v of Object.values(api)) if (typeof v === "function" && "mockClear" in v) (v as ReturnType<typeof vi.fn>).mockClear(); });
 
 describe("Inspector · output", () => {
   it("lists the four presets and highlights the active one", () => {
@@ -105,11 +103,17 @@ describe("Inspector · clip", () => {
     await vol.setValue("1.5");
     await vol.trigger("change");
     expect(api.clipSetVolume).toHaveBeenCalledWith("a", 1.5, false);
-    const mute = w.find("input[type=checkbox]");
-    await mute.setValue(true);
+    const mute = w.find("button[data-muted]");
+    expect(mute.classes()).toContain("text-accent");
+    await mute.trigger("click");
     expect(api.clipSetVolume).toHaveBeenLastCalledWith("a", 1.5, true);
+    await w.vm.$nextTick();
+    expect(w.find("button[data-muted]").attributes("data-muted")).toBe("true");
+    const calls = api.clipSetVolume.mock.calls.length;
     const { w: silent } = setup(project([clip({ id: "a", media: media({ has_audio: false }) })]), "a");
-    expect(silent.find("input[type=checkbox]").attributes("disabled")).toBeDefined();
+    expect(silent.find("button[data-muted]").attributes("disabled")).toBeDefined();
+    await silent.find("button[data-muted]").trigger("click");
+    expect(api.clipSetVolume).toHaveBeenCalledTimes(calls); // silent clips ignore the toggle
   });
 
   it("split and delete act on the selected clip; split needs the playhead inside it", async () => {
@@ -141,36 +145,57 @@ describe("Inspector · clip", () => {
   });
 });
 
-describe("Inspector · music", () => {
-  it("offers to add a track and opens an audio picker", async () => {
-    const { w } = setup();
-    expect(w.text()).toContain("Add music track…");
-    dialogOpen.mockResolvedValueOnce("/audio/bed.m4a");
-    await byText(w, "Add music track").trigger("click");
-    await Promise.resolve();
-    expect(dialogOpen).toHaveBeenCalledWith(expect.objectContaining({ multiple: false }));
-    expect(api.musicSet).toHaveBeenCalledWith("/audio/bed.m4a");
-    dialogOpen.mockResolvedValueOnce(null);
-    await byText(w, "Add music track").trigger("click");
-    await Promise.resolve();
-    expect(api.musicSet).toHaveBeenCalledTimes(1);
+describe("Inspector · overlay and audio clips", () => {
+  it("shows nothing special when only a V1 clip is selected", () => {
+    const { w } = setup(undefined, "a");
+    expect(w.text()).toContain("Overlays (V2) and audio clips show their controls here");
+    expect(w.text()).not.toContain("Reset placement");
   });
 
-  it("edits and removes an existing track", async () => {
-    const { w } = setup(project([clip({ id: "a" })], { music: music({ source: "/audio/lofi.mp3", volume: 0.5 }) }));
+  it("edits the selected overlay: length, size, fades, placement reset, delete", async () => {
+    const ov = overlay({ id: "ov1", media: stillMedia(), timeline_start: 1000, source_end: 5000, placement: { scale: 0.35, x: 0.85, y: 0.85 } });
+    const { store, w } = setup(project([clip({ id: "a" })], { overlays: [ov] }));
+    store.select({ kind: "overlay", id: "ov1" });
+    await w.vm.$nextTick();
+    expect(w.text()).toContain("Still image");
+    expect(w.text()).toContain("35%");
+    const section = w.findAll("section").find((s) => s.text().includes("Overlay"))!;
+    const sliders = section.findAll("input[type=range]");
+    await sliders[0].setValue("8000"); await sliders[0].trigger("change");
+    expect(api.overlayTrim).toHaveBeenCalledWith("ov1", 0, 8000);
+    await sliders[1].setValue("0.5"); await sliders[1].trigger("change");
+    expect(api.overlaySetPlacement).toHaveBeenCalledWith("ov1", { scale: 0.5, x: 0.85, y: 0.85 });
+    await sliders[2].setValue("500"); await sliders[2].trigger("change");
+    expect(api.overlaySetFades).toHaveBeenCalledWith("ov1", 500, 0);
+    await byText(w, "Reset placement").trigger("click");
+    expect(api.overlaySetPlacement).toHaveBeenLastCalledWith("ov1", { scale: 0.35, x: 0.85, y: 0.85 });
+    await byText(w, "Delete").trigger("click");
+    expect(api.overlayDelete).toHaveBeenCalledWith("ov1");
+  });
+
+  it("edits the selected audio clip and its track mute", async () => {
+    const ac = audioClip({ id: "ac1", source: "/audio/lofi.mp3", volume: 0.5, timeline_start: 2000 });
+    const { store, w } = setup(project([clip({ id: "a" })], { audio_tracks: [audioTrack([ac], { id: "t1", label: "Narration" })] }));
+    store.select({ kind: "audio", id: "ac1", trackId: "t1" });
+    await w.vm.$nextTick();
+    expect(w.text()).toContain("Audio · Narration");
     expect(w.text()).toContain("lofi.mp3");
     expect(w.text()).toContain("50%");
-    const musicSection = w.findAll("section")[2];
-    const sliders = musicSection.findAll("input[type=range]");
-    await sliders[0].setValue("0.8");
-    await sliders[0].trigger("change");
-    expect(api.musicUpdate).toHaveBeenCalledWith(expect.objectContaining({ source: "/audio/lofi.mp3", volume: 0.8 }));
-    await sliders[1].setValue("2000");
-    await sliders[1].trigger("change");
-    expect(api.musicUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ timeline_start: 2000 }));
-    await musicSection.find("input[type=checkbox]").setValue(true);
-    expect(api.musicUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ muted: true }));
-    await byText(w, "Remove").trigger("click");
-    expect(api.musicSet).toHaveBeenCalledWith(null);
+    const section = w.findAll("section").find((s) => s.text().includes("Audio · Narration"))!;
+    const sliders = section.findAll("input[type=range]");
+    await sliders[0].setValue("0.8"); await sliders[0].trigger("change");
+    expect(api.audioClipSet).toHaveBeenCalledWith("ac1", 0.8, 0, 0, false);
+    await sliders[2].setValue("1000"); await sliders[2].trigger("change");
+    expect(api.audioClipSet).toHaveBeenLastCalledWith("ac1", 0.8, 0, 1000, false);
+    const toggles = section.findAll("button[data-muted]");
+    expect(toggles[0].classes()).toContain("text-accent");
+    await toggles[0].trigger("click");
+    expect(api.audioClipSet).toHaveBeenLastCalledWith("ac1", 0.8, 0, 1000, true);
+    await w.vm.$nextTick();
+    expect(section.findAll("button[data-muted]")[0].classes()).toContain("text-muted");
+    await toggles[1].trigger("click");
+    expect(api.audioTrackUpdate).toHaveBeenCalledWith("t1", "Narration", true);
+    await byText(w, "Delete").trigger("click");
+    expect(api.audioClipDelete).toHaveBeenCalledWith("ac1");
   });
 });

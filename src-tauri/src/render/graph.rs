@@ -1,7 +1,7 @@
 //! Translates a `Project` into an ffmpeg `-filter_complex` argv. Pure function; unit-tested by
 //! inspecting the generated arguments. The frontend never sees any of this.
 
-use crate::project::{Clip, Ms, Project, Transition};
+use crate::project::{AudioClip, Clip, Ms, OverlayClip, Project, Transition};
 use crate::render::ffmpeg::ms_to_secs;
 use crate::render::planner::ExportSettings;
 
@@ -57,9 +57,9 @@ fn video_chain(p: &Project, i: usize, c: &Clip, fps: f64) -> String {
     format!("{}[v{i}]", chain.join(","))
 }
 
-fn audio_chain(i: usize, c: &Clip) -> String {
+fn audio_chain(i: usize, c: &Clip, track_muted: bool) -> String {
     let d = c.duration_ms();
-    if !c.media.has_audio || c.muted {
+    if !c.media.has_audio || c.muted || track_muted {
         return format!("anullsrc=r=48000:cl=stereo:d={}[a{i}]", f(d));
     }
     let mut chain = vec![
@@ -80,26 +80,106 @@ fn audio_chain(i: usize, c: &Clip) -> String {
     format!("{}[a{i}]", chain.join(","))
 }
 
+/// ffmpeg inputs in order. V1 clips come first so `[i:v]` == clip index; overlays and audio
+/// clips follow, each with whatever pre-input flags they need.
+struct Inputs {
+    args: Vec<String>,
+    next: usize,
+}
+
+impl Inputs {
+    fn new() -> Self {
+        Inputs { args: vec!["-y".into()], next: 0 }
+    }
+    fn add(&mut self, path: &std::path::Path, pre: &[String]) -> usize {
+        self.args.extend_from_slice(pre);
+        self.args.push("-i".into());
+        self.args.push(path.to_string_lossy().into());
+        self.next += 1;
+        self.next - 1
+    }
+}
+
+/// Overlay (V2) video: scaled by placement, alpha fades, then shifted to its timeline position.
+fn overlay_chain(p: &Project, input: usize, k: usize, o: &OverlayClip, fps: f64) -> String {
+    let (ow, _) = p.aspect.dimensions();
+    let d = o.duration_ms();
+    let bw = even(ow as f64 * o.placement.scale as f64);
+    let mut chain = vec![
+        format!("[{input}:v]trim=start={}:end={}", f(o.source_start), f(o.source_end)),
+        "setpts=PTS-STARTPTS".into(),
+        "format=rgba".into(),
+        format!("scale={bw}:-2:flags=bicubic"),
+        format!("fps={fps}"),
+        "format=yuva420p".into(),
+        "setsar=1".into(),
+    ];
+    if o.fade_in > 0 {
+        chain.push(format!("fade=t=in:st=0:d={}:alpha=1", f(o.fade_in)));
+    }
+    if o.fade_out > 0 {
+        chain.push(format!("fade=t=out:st={}:d={}:alpha=1", f(d.saturating_sub(o.fade_out)), f(o.fade_out)));
+    }
+    chain.push(format!("setpts=PTS+{}/TB", f(o.timeline_start)));
+    format!("{}[ov{k}]", chain.join(","))
+}
+
+/// One free-positioned audio clip: trimmed, shaped, then delayed to its timeline position.
+fn free_audio_chain(input: usize, label: &str, c: &AudioClip) -> String {
+    let d = c.duration_ms();
+    let mut chain = vec![
+        format!("[{input}:a]atrim=start={}:end={}", f(c.source_start), f(c.source_end)),
+        "asetpts=PTS-STARTPTS".into(),
+        AUDIO_FMT.into(),
+        format!("volume={:.3}", c.volume),
+    ];
+    if c.fade_in > 0 {
+        chain.push(format!("afade=t=in:st=0:d={}", f(c.fade_in)));
+    }
+    if c.fade_out > 0 {
+        chain.push(format!("afade=t=out:st={}:d={}", f(d.saturating_sub(c.fade_out)), f(c.fade_out)));
+    }
+    if c.timeline_start > 0 {
+        chain.push(format!("adelay=delays={}:all=1", c.timeline_start));
+    }
+    format!("{}[{label}]", chain.join(","))
+}
+
 pub fn build_args(p: &Project, s: &ExportSettings) -> Vec<String> {
     let fps = p.output_fps().as_f64();
     let n = p.clips.len();
-    let mut args: Vec<String> = vec!["-y".into()];
+    let v1_len = p.duration_ms();
+    let mut inputs = Inputs::new();
     for c in &p.clips {
-        args.push("-i".into());
-        args.push(c.source.to_string_lossy().into());
+        let pre: Vec<String> = if c.media.is_still {
+            ["-loop", "1", "-framerate", &format!("{fps}"), "-t", &f(c.source_end)].map(String::from).to_vec()
+        } else { Vec::new() };
+        inputs.add(&c.source, &pre);
     }
-    let music_idx = p.music.as_ref().map(|m| {
-        args.push("-i".into());
-        args.push(m.source.to_string_lossy().into());
-        n
-    });
+    // Overlays that never appear inside the V1 span are left out entirely.
+    let overlays: Vec<(usize, &OverlayClip)> = if s.audio_only {
+        Vec::new()
+    } else {
+        p.overlays.iter().filter(|o| o.timeline_start < v1_len).map(|o| {
+            let pre: Vec<String> = if o.media.is_still {
+                ["-loop", "1", "-framerate", &format!("{fps}"), "-t", &f(o.duration_ms())].map(String::from).to_vec()
+            } else { Vec::new() };
+            (inputs.add(&o.source, &pre), o)
+        }).collect()
+    };
+    // Audible audio clips only; muted clips and muted tracks are not even inputs.
+    let audio: Vec<(usize, &AudioClip)> = p.audio_tracks.iter().filter(|t| !t.muted)
+        .flat_map(|t| t.clips.iter().filter(|c| !c.muted && c.timeline_start < v1_len))
+        .map(|c| (inputs.add(&c.source, &[]), c))
+        .collect();
+    let mut args = inputs.args;
 
     let mut filters: Vec<String> = Vec::new();
     for (i, c) in p.clips.iter().enumerate() {
         if !s.audio_only {
             filters.push(video_chain(p, i, c, fps));
         }
-        filters.push(audio_chain(i, c));
+        filters.push(audio_chain(i, c, p.video_muted));
     }
 
     // Chain clips left to right, honouring transition_out of the left clip.
@@ -136,29 +216,29 @@ pub fn build_args(p: &Project, s: &ExportSettings) -> Vec<String> {
         cur_a = na;
     }
 
-    // Music bed.
-    if let (Some(m), Some(mi)) = (&p.music, music_idx) {
-        if !m.muted {
-            let d = m.trim_end.saturating_sub(m.trim_start);
-            let mut chain = vec![
-                format!("[{mi}:a]atrim=start={}:end={}", f(m.trim_start), f(m.trim_end)),
-                "asetpts=PTS-STARTPTS".into(),
-                AUDIO_FMT.into(),
-                format!("volume={:.3}", m.volume),
-            ];
-            if m.fade_in > 0 {
-                chain.push(format!("afade=t=in:st=0:d={}", f(m.fade_in)));
-            }
-            if m.fade_out > 0 {
-                chain.push(format!("afade=t=out:st={}:d={}", f(d.saturating_sub(m.fade_out)), f(m.fade_out)));
-            }
-            if m.timeline_start > 0 {
-                chain.push(format!("adelay=delays={}:all=1", m.timeline_start));
-            }
-            filters.push(format!("{}[am]", chain.join(",")));
-            filters.push(format!("[{cur_a}][am]amix=inputs=2:duration=first:normalize=0[amix]"));
-            cur_a = "amix".into();
+    // Overlay track, composited on top of the finished V1 chain in timeline time.
+    let (ow, oh) = p.aspect.dimensions();
+    for (k, (input, o)) in overlays.iter().enumerate() {
+        filters.push(overlay_chain(p, *input, k, o, fps));
+        let (x, y) = (o.placement.x as f64, o.placement.y as f64);
+        filters.push(format!(
+            "[{cur_v}][ov{k}]overlay=x={}:y={}:eof_action=pass:enable='between(t,{},{})'[vo{k}]",
+            format!("{:.0}-w/2", ow as f64 * x), format!("{:.0}-h/2", oh as f64 * y),
+            f(o.timeline_start), f(o.end_ms())
+        ));
+        cur_v = format!("vo{k}");
+    }
+
+    // Audio tracks, mixed under the V1 audio; `duration=first` keeps V1 as the clock.
+    if !audio.is_empty() {
+        let mut labels = vec![format!("[{cur_a}]")];
+        for (k, (input, c)) in audio.iter().enumerate() {
+            let label = format!("au{k}");
+            filters.push(free_audio_chain(*input, &label, c));
+            labels.push(format!("[{label}]"));
         }
+        filters.push(format!("{}amix=inputs={}:duration=first:normalize=0[amix]", labels.concat(), labels.len()));
+        cur_a = "amix".into();
     }
 
     filters.push(format!("[{cur_a}]atrim=end={}[aout]", f(cur_len)));
@@ -197,11 +277,17 @@ mod tests {
         MediaInfo {
             duration_ms: 5000, width: w, height: h, fps: Rational { num: 30, den: 1 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
     fn settings() -> ExportSettings {
         ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false }
+    }
+    fn add_music(p: &mut Project, dur: Ms, at: Ms) -> uuid::Uuid {
+        let t = timeline::audio_track_add(p, "Music");
+        let mut m = media(0, 0);
+        m.duration_ms = dur;
+        timeline::audio_clip_add(p, t, AudioClip::new(PathBuf::from("/m.m4a"), m), at).unwrap()
     }
     fn filter_of(args: &[String]) -> String {
         let i = args.iter().position(|a| a == "-filter_complex").unwrap();
@@ -240,7 +326,7 @@ mod tests {
         let a = p.clips[0].id;
         timeline::set_transition(&mut p, a, Transition::CrossDissolve { ms: 1000 }).unwrap();
         timeline::set_fades(&mut p, a, 500, 0).unwrap();
-        p.music = Some(AudioTrack::new(PathBuf::from("/m.m4a"), 8000));
+        add_music(&mut p, 8000, 0);
         let args = build_args(&p, &settings());
         let fc = filter_of(&args);
         assert!(fc.contains("[v0]"), "{fc}");
@@ -254,6 +340,17 @@ mod tests {
         assert_eq!(args.iter().filter(|a| *a == "-i").count(), 4);
         assert!(args.contains(&"h264_videotoolbox".into()));
         assert!(args.contains(&"10000k".into()));
+    }
+
+    #[test]
+    fn muting_the_video_track_silences_every_clip() {
+        let mut p = Project::new("t");
+        for i in 0..2 { timeline::append(&mut p, Clip::new(PathBuf::from(format!("/{i}.mp4")), media(1920, 1080))); }
+        p.video_muted = true;
+        let fc = filter_of(&build_args(&p, &settings()));
+        assert!(fc.contains("anullsrc=r=48000:cl=stereo:d=5.000[a0]"), "{fc}");
+        assert!(fc.contains("anullsrc=r=48000:cl=stereo:d=5.000[a1]"), "{fc}");
+        assert!(!fc.contains("[0:a]") && !fc.contains("[1:a]"), "{fc}");
     }
 
     #[test]
@@ -290,7 +387,7 @@ mod more_tests {
         MediaInfo {
             duration_ms: 5000, width: w, height: h, fps: Rational { num: 30, den: 1 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
     fn settings() -> ExportSettings {
@@ -299,6 +396,10 @@ mod more_tests {
     fn filter_of(args: &[String]) -> String {
         let i = args.iter().position(|a| a == "-filter_complex").unwrap();
         args[i + 1].clone()
+    }
+    fn audio_media(dur: Ms) -> MediaInfo { let mut m = media(0, 0); m.duration_ms = dur; m }
+    fn still_media() -> MediaInfo {
+        let mut m = media(400, 300); m.is_still = true; m.has_audio = false; m.duration_ms = STILL_DEFAULT_MS; m
     }
     fn two_clips() -> Project {
         let mut p = Project::new("t");
@@ -427,50 +528,129 @@ mod more_tests {
     }
 
     #[test]
-    fn music_bed_with_offset_trim_and_fades() {
+    fn audio_clip_with_offset_trim_and_fades() {
         let mut p = two_clips();
-        let mut m = AudioTrack::new(PathBuf::from("/m.m4a"), 20_000);
-        m.trim_start = 1000;
-        m.trim_end = 9000;
-        m.timeline_start = 2500;
-        m.fade_in = 500;
-        m.fade_out = 1000;
-        m.volume = 0.3;
-        p.music = Some(m);
+        let t = timeline::audio_track_add(&mut p, "Music");
+        let id = timeline::audio_clip_add(&mut p, t, AudioClip::new(PathBuf::from("/m.m4a"), audio_media(20_000)), 2500).unwrap();
+        timeline::audio_clip_trim(&mut p, id, 1000, 9000).unwrap();
+        timeline::audio_clip_set(&mut p, id, 0.3, 500, 1000, false).unwrap();
         let args = build_args(&p, &settings());
         assert_eq!(args.iter().filter(|a| *a == "-i").count(), 3);
-        assert_eq!(args[6], "/m.m4a", "music is the last input");
+        assert_eq!(args[6], "/m.m4a", "audio clips come after the V1 clips");
         let fc = filter_of(&args);
-        let am = fc.split(';').find(|s| s.ends_with("[am]")).unwrap();
+        let am = fc.split(';').find(|s| s.ends_with("[au0]")).unwrap();
         assert_eq!(
             am,
-            "[2:a]atrim=start=1.000:end=9.000,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=0.300,afade=t=in:st=0:d=0.500,afade=t=out:st=7.000:d=1.000,adelay=delays=2500:all=1[am]"
+            "[2:a]atrim=start=1.000:end=9.000,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=0.300,afade=t=in:st=0:d=0.500,afade=t=out:st=7.000:d=1.000,adelay=delays=2500:all=1[au0]"
         );
-        assert!(fc.contains("[ax1][am]amix=inputs=2:duration=first:normalize=0[amix]"), "{fc}");
+        assert!(fc.contains("[ax1][au0]amix=inputs=2:duration=first:normalize=0[amix]"), "{fc}");
         assert!(fc.contains("[amix]atrim=end=10.000[aout]"), "{fc}");
     }
 
     #[test]
-    fn muted_music_is_still_an_input_but_not_mixed() {
+    fn muted_clips_and_muted_tracks_are_not_inputs() {
         let mut p = two_clips();
-        let mut m = AudioTrack::new(PathBuf::from("/m.m4a"), 20_000);
-        m.muted = true;
-        p.music = Some(m);
+        let t = timeline::audio_track_add(&mut p, "Music");
+        let id = timeline::audio_clip_add(&mut p, t, AudioClip::new(PathBuf::from("/m.m4a"), audio_media(20_000)), 0).unwrap();
+        timeline::audio_clip_set(&mut p, id, 1.0, 0, 0, true).unwrap();
         let args = build_args(&p, &settings());
-        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 3);
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 2);
         let fc = filter_of(&args);
         assert!(!fc.contains("amix"), "{fc}");
-        assert!(!fc.contains("[am]"), "{fc}");
         assert!(fc.contains("[ax1]atrim=end=10.000[aout]"), "{fc}");
+        // unmute the clip, mute the track
+        timeline::audio_clip_set(&mut p, id, 1.0, 0, 0, false).unwrap();
+        timeline::audio_track_update(&mut p, t, "Music", true).unwrap();
+        let args = build_args(&p, &settings());
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 2);
+        assert!(!filter_of(&args).contains("amix"));
+        // a clip that starts after V1 ends is also dropped
+        timeline::audio_track_update(&mut p, t, "Music", false).unwrap();
+        timeline::audio_clip_move(&mut p, id, t, 10_000).unwrap();
+        assert_eq!(build_args(&p, &settings()).iter().filter(|a| *a == "-i").count(), 2);
     }
 
     #[test]
-    fn music_at_timeline_start_zero_has_no_adelay() {
+    fn audio_clip_at_zero_has_no_adelay_and_three_clips_make_a_four_way_mix() {
         let mut p = two_clips();
-        p.music = Some(AudioTrack::new(PathBuf::from("/m.m4a"), 20_000));
+        let t = timeline::audio_track_add(&mut p, "Music");
+        timeline::audio_clip_add(&mut p, t, AudioClip::new(PathBuf::from("/m.m4a"), audio_media(20_000)), 0).unwrap();
         let fc = filter_of(&build_args(&p, &settings()));
         assert!(!fc.contains("adelay"), "{fc}");
-        assert!(fc.contains("volume=0.500"), "default bed level");
+        assert!(fc.contains("volume=1.000"), "{fc}");
+        let sfx = timeline::audio_track_add(&mut p, "SFX");
+        timeline::audio_clip_add(&mut p, sfx, AudioClip::new(PathBuf::from("/x.wav"), audio_media(500)), 1000).unwrap();
+        timeline::audio_clip_add(&mut p, sfx, AudioClip::new(PathBuf::from("/y.wav"), audio_media(500)), 3000).unwrap();
+        let args = build_args(&p, &settings());
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 5);
+        let fc = filter_of(&args);
+        assert!(fc.contains("[ax1][au0][au1][au2]amix=inputs=4:duration=first:normalize=0[amix]"), "{fc}");
+        assert!(fc.contains("adelay=delays=3000:all=1[au2]"), "{fc}");
+    }
+
+    #[test]
+    fn video_overlay_is_composited_after_the_v1_chain_in_timeline_time() {
+        let mut p = two_clips();
+        let a = p.clips[0].id;
+        timeline::set_transition(&mut p, a, Transition::CrossDissolve { ms: 1000 }).unwrap();
+        let id = timeline::overlay_add(&mut p, OverlayClip::new(PathBuf::from("/o.mp4"), media(1280, 720)), 2000, 0);
+        timeline::overlay_trim(&mut p, id, 500, 2500).unwrap();
+        timeline::overlay_set_fades(&mut p, id, 250, 250).unwrap();
+        let args = build_args(&p, &settings());
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 3);
+        assert!(!args.contains(&"-loop".into()));
+        let fc = filter_of(&args);
+        let ov = fc.split(';').find(|s| s.ends_with("[ov0]")).unwrap();
+        assert_eq!(
+            ov,
+            "[2:v]trim=start=0.500:end=2.500,setpts=PTS-STARTPTS,format=rgba,scale=1920:-2:flags=bicubic,fps=30,format=yuva420p,setsar=1,fade=t=in:st=0:d=0.250:alpha=1,fade=t=out:st=1.750:d=0.250:alpha=1,setpts=PTS+2.000/TB[ov0]"
+        );
+        assert!(fc.contains("[vx1][ov0]overlay=x=960-w/2:y=540-h/2:eof_action=pass:enable='between(t,2.000,4.000)'[vo0]"), "{fc}");
+        assert!(fc.ends_with("[vo0]trim=end=9.000[vout]"), "{fc}");
+        // audio-only exports ignore overlays completely
+        let mut s = settings(); s.audio_only = true;
+        let args = build_args(&p, &s);
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 2);
+        assert!(!filter_of(&args).contains("overlay"));
+    }
+
+    #[test]
+    fn still_on_v1_is_a_looped_input_with_silence_and_layers_composite_in_order() {
+        let mut p = Project::new("s");
+        timeline::append(&mut p, Clip::new(PathBuf::from("/title.png"), still_media()));
+        timeline::append(&mut p, Clip::new(PathBuf::from("/a.mp4"), media(1920, 1080)));
+        let t = p.clips[0].id;
+        timeline::trim(&mut p, t, 0, 3000).unwrap();
+        let hi = timeline::overlay_add(&mut p, OverlayClip::new(PathBuf::from("/hi.png"), still_media()), 0, 1);
+        let lo = timeline::overlay_add(&mut p, OverlayClip::new(PathBuf::from("/lo.png"), still_media()), 0, 0);
+        let args = build_args(&p, &settings());
+        assert_eq!(&args[1..9], &["-loop", "1", "-framerate", "30", "-t", "3.000", "-i", "/title.png"]);
+        let fc = filter_of(&args);
+        assert!(fc.contains("anullsrc=r=48000:cl=stereo:d=3.000[a0]"), "{fc}");
+        assert!(fc.contains("[0:v]trim=start=0.000:end=3.000"), "{fc}");
+        // lower layer first, then the higher one on top of it
+        assert!(fc.contains("[vx1][ov0]overlay"), "{fc}");
+        assert!(fc.contains("[vo0][ov1]overlay"), "{fc}");
+        let i_lo = args.iter().position(|a| a == "/lo.png").unwrap();
+        let i_hi = args.iter().position(|a| a == "/hi.png").unwrap();
+        assert!(i_lo < i_hi, "inputs follow layer order");
+        let _ = (hi, lo);
+    }
+
+    #[test]
+    fn still_overlay_loops_the_image_and_is_placed_by_its_badge() {
+        let mut p = two_clips();
+        let id = timeline::overlay_add(&mut p, OverlayClip::new(PathBuf::from("/l.png"), still_media()), 1000, 0);
+        timeline::overlay_trim(&mut p, id, 0, 3000).unwrap();
+        let args = build_args(&p, &settings());
+        let i = args.iter().position(|a| a == "-loop").unwrap();
+        assert_eq!(&args[i..i + 8], &["-loop", "1", "-framerate", "30", "-t", "3.000", "-i", "/l.png"]);
+        let fc = filter_of(&args);
+        assert!(fc.contains("[2:v]trim=start=0.000:end=3.000,setpts=PTS-STARTPTS,format=rgba,scale=672:-2"), "{fc}");
+        assert!(fc.contains("overlay=x=1632-w/2:y=918-h/2:eof_action=pass:enable='between(t,1.000,4.000)'"), "{fc}");
+        // an overlay starting after V1 ends is skipped
+        timeline::overlay_move(&mut p, id, 10_000, 0).unwrap();
+        assert_eq!(build_args(&p, &settings()).iter().filter(|a| *a == "-i").count(), 2);
     }
 
     #[test]
@@ -497,7 +677,8 @@ mod more_tests {
         let mut p = two_clips();
         let a = p.clips[0].id;
         timeline::set_transition(&mut p, a, Transition::CrossDissolve { ms: 1000 }).unwrap();
-        p.music = Some(AudioTrack::new(PathBuf::from("/m.m4a"), 20_000));
+        let t = timeline::audio_track_add(&mut p, "Music");
+        timeline::audio_clip_add(&mut p, t, AudioClip::new(PathBuf::from("/m.m4a"), audio_media(20_000)), 0).unwrap();
         let mut s = settings();
         s.audio_only = true;
         let args = build_args(&p, &s);

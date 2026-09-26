@@ -17,12 +17,28 @@ const exportOpen = ref(false);
 const helpOpen = ref(false);
 const ffmpegMissing = ref(false);
 const VIDEO_EXT = ["mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts"];
+const AUDIO_EXT = ["mp3", "m4a", "aac", "wav", "aiff", "flac"];
+const IMAGE_EXT = ["png", "jpg", "jpeg", "webp"];
+const MEDIA_EXT = [...VIDEO_EXT, ...AUDIO_EXT, ...IMAGE_EXT];
 
+/** ⌘I: video lands on V1 and in the pool; audio and images go to the pool. */
 async function importDialog() {
-  const p = await open({ multiple: true, filters: [{ name: "Video", extensions: VIDEO_EXT }] });
+  const p = await open({ multiple: true, filters: [{ name: "Media", extensions: MEDIA_EXT }, { name: "Video", extensions: VIDEO_EXT }] });
   if (Array.isArray(p)) await store.importMedia(p);
   else if (typeof p === "string") await store.importMedia([p]);
 }
+
+// Resizable timeline panel: drag the handle above it.
+let resizeStart: { y: number; h: number } | null = null;
+function startResize(e: PointerEvent) {
+  resizeStart = { y: e.clientY, h: store.timelineHeight };
+  (e.target as HTMLElement).setPointerCapture(e.pointerId);
+}
+function onResize(e: PointerEvent) {
+  if (!resizeStart) return;
+  store.timelineHeight = Math.round(Math.min(Math.max(200, resizeStart.h - (e.clientY - resizeStart.y)), window.innerHeight * 0.7));
+}
+function endResize() { resizeStart = null; }
 async function openProject() {
   if (store.dirty && !(await ask("Discard unsaved changes?", { title: "ForgeVideo", kind: "warning" }))) return;
   const p = await open({ multiple: false, filters: [{ name: "ForgeVideo project", extensions: ["forgevideo", "json"] }] });
@@ -50,8 +66,8 @@ function onKey(e: KeyboardEvent) {
   if (e.key === "?" && !meta) { e.preventDefault(); helpOpen.value = !helpOpen.value; return; }
   if (helpOpen.value) return;
   if (e.code === "Space") { e.preventDefault(); if (store.clips.length) store.playing = !store.playing; }
-  else if (e.key === "s" && !meta) { e.preventDefault(); void store.splitAtPlayhead(); }
-  else if ((e.key === "Backspace" || e.key === "Delete") && store.selectedClipId) { e.preventDefault(); void store.deleteClip(store.selectedClipId); }
+  else if (meta && e.key === "t") { e.preventDefault(); void store.splitAtPlayhead(); }
+  else if ((e.key === "Backspace" || e.key === "Delete") && store.selected) { e.preventDefault(); void store.deleteSelected(); }
   else if (e.key === "ArrowLeft") { store.playing = false; store.seek(store.playhead - (e.shiftKey ? 1000 : 33)); }
   else if (e.key === "ArrowRight") { store.playing = false; store.seek(store.playhead + (e.shiftKey ? 1000 : 33)); }
   else if (e.key === "Home") { store.playing = false; store.seek(0); }
@@ -70,8 +86,8 @@ onMounted(async () => {
   window.addEventListener("keydown", onKey);
   unlistenDrop = await getCurrentWebview().onDragDropEvent((e) => {
     if (e.payload.type !== "drop") return;
-    const paths = e.payload.paths.filter((p) => VIDEO_EXT.includes(p.split(".").pop()?.toLowerCase() ?? ""));
-    if (paths.length) void store.importMedia(paths);
+    const paths = e.payload.paths.filter((p) => MEDIA_EXT.includes(p.split(".").pop()?.toLowerCase() ?? ""));
+    if (paths.length) void store.poolAdd(paths);
   });
   void getCurrentWindow().setTitle("ForgeVideo");
 });
@@ -87,7 +103,7 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); unlistenDr
       <button class="px-2 py-1 rounded hover:bg-panel-2" @click="openProject">Open</button>
       <button class="px-2 py-1 rounded hover:bg-panel-2" @click="saveProject(false)">Save{{ store.dirty ? ' •' : '' }}</button>
       <span class="w-px h-5 bg-line mx-1" />
-      <button class="px-2 py-1 rounded hover:bg-panel-2" @click="importDialog">Import video…</button>
+      <button class="px-2 py-1 rounded hover:bg-panel-2" @click="importDialog">Import…</button>
       <span class="flex-1" />
       <span v-if="store.error" class="text-danger truncate max-w-md mr-3" :title="store.error">{{ store.error }}</span>
       <span v-if="ffmpegMissing" class="text-danger mr-3">ffmpeg not found — brew install ffmpeg</span>
@@ -101,7 +117,11 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); unlistenDr
       <Inspector />
     </div>
 
-    <div class="h-[200px] shrink-0">
+    <div
+      class="h-1 shrink-0 cursor-row-resize bg-line hover:bg-accent/60" title="Drag to resize the timeline" data-testid="timeline-resize"
+      @pointerdown="startResize" @pointermove="onResize" @pointerup="endResize" @pointercancel="endResize"
+    />
+    <div class="shrink-0" :style="{ height: store.timelineHeight + 'px' }">
       <Timeline />
     </div>
 

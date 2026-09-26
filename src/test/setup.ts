@@ -32,3 +32,17 @@ Object.defineProperty(HTMLMediaElement.prototype, "readyState", { value: 1, conf
 (globalThis as any).cancelAnimationFrame = (id: number) => clearTimeout(id);
 if (!Element.prototype.setPointerCapture) Element.prototype.setPointerCapture = () => {};
 if (!Element.prototype.releasePointerCapture) Element.prototype.releasePointerCapture = () => {};
+
+// happy-dom's localStorage is not a usable Storage here; a Map-backed stand-in is enough for persistence tests.
+const mem = new Map<string, string>();
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => { mem.set(k, String(v)); },
+    removeItem: (k: string) => { mem.delete(k); },
+    clear: () => mem.clear(),
+    key: (i: number) => [...mem.keys()][i] ?? null,
+    get length() { return mem.size; },
+  },
+});

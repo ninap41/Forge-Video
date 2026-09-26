@@ -13,15 +13,19 @@ fn absolutize(path: &Path, base: &Path) -> PathBuf {
     if path.is_absolute() { path.to_path_buf() } else { base.join(path) }
 }
 
+/// Every media path a project refers to. Keep this the single list so save/load never drift.
+fn for_each_path(p: &mut Project, mut f: impl FnMut(&mut PathBuf)) {
+    for c in &mut p.clips { f(&mut c.source); }
+    for o in &mut p.overlays { f(&mut o.source); }
+    for t in &mut p.audio_tracks { for c in &mut t.clips { f(&mut c.source); } }
+    for i in &mut p.pool { f(&mut i.path); }
+    if let Some(m) = &mut p.music { f(&mut m.source); }
+}
+
 pub fn save(project: &Project, file: &Path) -> Result<()> {
     let base = file.parent().unwrap_or_else(|| Path::new("/"));
     let mut p = project.clone();
-    for c in &mut p.clips {
-        c.source = relativize(&c.source, base);
-    }
-    if let Some(m) = &mut p.music {
-        m.source = relativize(&m.source, base);
-    }
+    for_each_path(&mut p, |s| *s = relativize(s, base));
     let json = serde_json::to_string_pretty(&p)?;
     std::fs::write(file, json)?;
     Ok(())
@@ -30,12 +34,8 @@ pub fn save(project: &Project, file: &Path) -> Result<()> {
 pub fn load(file: &Path) -> Result<Project> {
     let base = file.parent().unwrap_or_else(|| Path::new("/"));
     let mut p: Project = serde_json::from_str(&std::fs::read_to_string(file)?)?;
-    for c in &mut p.clips {
-        c.source = absolutize(&c.source, base);
-    }
-    if let Some(m) = &mut p.music {
-        m.source = absolutize(&m.source, base);
-    }
+    for_each_path(&mut p, |s| *s = absolutize(s, base));
+    p.migrate();
     crate::timeline::relayout(&mut p);
     Ok(p)
 }
@@ -49,7 +49,7 @@ mod tests {
         MediaInfo {
             duration_ms: 5000, width: 1280, height: 720, fps: Rational { num: 30, den: 1 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
 
@@ -81,22 +81,47 @@ mod more_tests {
         MediaInfo {
             duration_ms: 5000, width: 1280, height: 720, fps: Rational { num: 30, den: 1 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
 
     #[test]
-    fn music_path_is_relativised_too() {
+    fn overlay_audio_and_pool_paths_are_relativised_too() {
         let dir = tempfile::tempdir().unwrap();
-        let inside = dir.path().join("bed.m4a");
+        let bed = dir.path().join("bed.m4a");
+        let logo = dir.path().join("logo.png");
         let mut p = Project::new("m");
-        p.music = Some(AudioTrack::new(inside.clone(), 8000));
+        let mut t = AudioTrack::new("Music");
+        let mut am = media(); am.width = 0;
+        t.clips.push(AudioClip::new(bed.clone(), am));
+        p.audio_tracks.push(t);
+        let mut st = media(); st.is_still = true;
+        p.overlays.push(OverlayClip::new(logo.clone(), st));
+        p.pool.push(PoolItem { id: uuid::Uuid::new_v4(), path: bed.clone(), media: media() });
         let file = dir.path().join("p.forgevideo");
         save(&p, &file).unwrap();
         let raw = std::fs::read_to_string(&file).unwrap();
-        assert!(raw.contains("\"bed.m4a\""), "{raw}");
+        assert!(raw.contains("\"bed.m4a\"") && raw.contains("\"logo.png\""), "{raw}");
         assert!(!raw.contains(dir.path().to_str().unwrap()));
-        assert_eq!(load(&file).unwrap().music.unwrap().source, inside);
+        let l = load(&file).unwrap();
+        assert_eq!(l.audio_tracks[0].clips[0].source, bed);
+        assert_eq!(l.overlays[0].source, logo);
+        assert_eq!(l.pool[0].path, bed);
+    }
+
+    #[test]
+    fn v1_file_with_music_bed_loads_as_a_music_track() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("old.forgevideo");
+        std::fs::write(&file, r#"{"version":1,"id":"6f6f5c1e-0000-4000-8000-000000000000","name":"old","aspect":"YouTube16x9",
+            "crop":{"scale":1.0,"x":0.5,"y":0.5},"clips":[],
+            "music":{"source":"bed.m4a","duration_ms":9000,"timeline_start":0,"trim_start":0,"trim_end":9000,"volume":0.5,"fade_in":0,"fade_out":0,"muted":false},
+            "fps":null}"#).unwrap();
+        let l = load(&file).unwrap();
+        assert!(l.music.is_none());
+        assert_eq!(l.version, PROJECT_FILE_VERSION);
+        assert_eq!(l.audio_tracks[0].label, "Music");
+        assert_eq!(l.audio_tracks[0].clips[0].source, dir.path().join("bed.m4a"), "relative bed path resolved");
     }
 
     #[test]

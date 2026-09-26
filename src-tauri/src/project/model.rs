@@ -7,7 +7,11 @@ use uuid::Uuid;
 
 pub type Ms = u64;
 
-pub const PROJECT_FILE_VERSION: u32 = 1;
+pub const PROJECT_FILE_VERSION: u32 = 2;
+/// Length a still image gets when it is first placed on the overlay track.
+pub const STILL_DEFAULT_MS: Ms = 5000;
+
+fn one() -> u32 { 1 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rational {
@@ -38,9 +42,23 @@ pub struct MediaInfo {
     pub sample_rate: Option<u32>,
     /// Display rotation in degrees (0, 90, 180, 270) from container metadata.
     pub rotation: i32,
+    /// A still image (png/jpeg/webp): no intrinsic duration, no audio.
+    #[serde(default)]
+    pub is_still: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaKind {
+    Video,
+    Audio,
+    Image,
 }
 
 impl MediaInfo {
+    pub fn kind(&self) -> MediaKind {
+        if self.is_still { MediaKind::Image } else if self.width > 0 { MediaKind::Video } else { MediaKind::Audio }
+    }
+
     /// Width/height as displayed (after rotation metadata is applied).
     pub fn display_size(&self) -> (u32, u32) {
         if self.rotation % 180 != 0 { (self.height, self.width) } else { (self.width, self.height) }
@@ -146,8 +164,129 @@ impl Clip {
     }
 }
 
+/// Where an overlay sits inside the output frame: `scale` = overlay width / output width,
+/// `x`/`y` = normalized centre. Default for stills is a small bottom-right badge; video fills the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Placement {
+    pub scale: f32,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Placement {
+    pub const FULL: Placement = Placement { scale: 1.0, x: 0.5, y: 0.5 };
+    pub const BADGE: Placement = Placement { scale: 0.35, x: 0.85, y: 0.85 };
+    pub fn clamped(self) -> Placement {
+        Placement { scale: self.scale.clamp(0.05, 1.0), x: self.x.clamp(0.0, 1.0), y: self.y.clamp(0.0, 1.0) }
+    }
+}
+
+/// A clip on the overlay (V2) track: free-positioned, silent, composited above V1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverlayClip {
+    pub id: Uuid,
+    pub source: PathBuf,
+    pub media: MediaInfo,
+    pub source_start: Ms,
+    /// For stills this is simply the on-screen length (source_start stays 0).
+    pub source_end: Ms,
+    pub timeline_start: Ms,
+    pub fade_in: Ms,
+    pub fade_out: Ms,
+    pub placement: Placement,
+    /// Which overlay row (0 = V2, 1 = V3, …). Higher layers composite on top.
+    #[serde(default)]
+    pub layer: u32,
+}
+
+impl OverlayClip {
+    pub fn new(source: PathBuf, media: MediaInfo) -> Self {
+        let still = media.is_still;
+        OverlayClip {
+            id: Uuid::new_v4(),
+            source,
+            source_end: if still { STILL_DEFAULT_MS } else { media.duration_ms },
+            media,
+            source_start: 0,
+            timeline_start: 0,
+            fade_in: 0,
+            fade_out: 0,
+            placement: if still { Placement::BADGE } else { Placement::FULL },
+            layer: 0,
+        }
+    }
+    pub fn duration_ms(&self) -> Ms {
+        self.source_end.saturating_sub(self.source_start)
+    }
+    pub fn end_ms(&self) -> Ms {
+        self.timeline_start + self.duration_ms()
+    }
+}
+
+/// A clip on an audio track: free-positioned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioClip {
+    pub id: Uuid,
+    pub source: PathBuf,
+    pub media: MediaInfo,
+    pub source_start: Ms,
+    pub source_end: Ms,
+    pub timeline_start: Ms,
+    pub volume: f32,
+    pub fade_in: Ms,
+    pub fade_out: Ms,
+    pub muted: bool,
+}
+
+impl AudioClip {
+    pub fn new(source: PathBuf, media: MediaInfo) -> Self {
+        AudioClip {
+            id: Uuid::new_v4(),
+            source,
+            source_end: media.duration_ms,
+            media,
+            source_start: 0,
+            timeline_start: 0,
+            volume: 1.0,
+            fade_in: 0,
+            fade_out: 0,
+            muted: false,
+        }
+    }
+    pub fn duration_ms(&self) -> Ms {
+        self.source_end.saturating_sub(self.source_start)
+    }
+    pub fn end_ms(&self) -> Ms {
+        self.timeline_start + self.duration_ms()
+    }
+}
+
+/// A labelled audio track (Music, SFX, Narration, …) holding free-positioned clips.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioTrack {
+    pub id: Uuid,
+    pub label: String,
+    pub muted: bool,
+    pub clips: Vec<AudioClip>,
+}
+
+impl AudioTrack {
+    pub fn new(label: impl Into<String>) -> Self {
+        AudioTrack { id: Uuid::new_v4(), label: label.into(), muted: false, clips: Vec::new() }
+    }
+}
+
+/// Media the user has imported but not necessarily placed. Kind comes from `media.kind()`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PoolItem {
+    pub id: Uuid,
+    pub path: PathBuf,
+    pub media: MediaInfo,
+}
+
+/// The pre-v2 single music bed. Only ever read, then migrated into an `AudioTrack`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LegacyMusic {
     pub source: PathBuf,
     pub duration_ms: Ms,
     pub timeline_start: Ms,
@@ -159,22 +298,6 @@ pub struct AudioTrack {
     pub muted: bool,
 }
 
-impl AudioTrack {
-    pub fn new(source: PathBuf, duration_ms: Ms) -> Self {
-        AudioTrack {
-            source,
-            duration_ms,
-            timeline_start: 0,
-            trim_start: 0,
-            trim_end: duration_ms,
-            volume: 0.5,
-            fade_in: 0,
-            fade_out: 0,
-            muted: false,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub version: u32,
@@ -183,7 +306,21 @@ pub struct Project {
     pub aspect: AspectPreset,
     pub crop: Crop,
     pub clips: Vec<Clip>,
-    pub music: Option<AudioTrack>,
+    #[serde(default)]
+    pub overlays: Vec<OverlayClip>,
+    /// Number of overlay rows shown (V2, V3, …). Always ≥ 1 and ≥ every clip's layer + 1.
+    #[serde(default = "one")]
+    pub overlay_layers: u32,
+    /// Track-level mute for V1: every clip's audio is silenced on export and in the preview.
+    #[serde(default)]
+    pub video_muted: bool,
+    #[serde(default)]
+    pub audio_tracks: Vec<AudioTrack>,
+    #[serde(default)]
+    pub pool: Vec<PoolItem>,
+    /// v1 files only; `migrate` folds it into `audio_tracks` and clears it. Never written.
+    #[serde(default, skip_serializing)]
+    pub music: Option<LegacyMusic>,
     /// Output frame rate. `None` = follow the first clip.
     pub fps: Option<Rational>,
 }
@@ -197,6 +334,11 @@ impl Project {
             aspect: AspectPreset::YouTube16x9,
             crop: Crop::default(),
             clips: Vec::new(),
+            overlays: Vec::new(),
+            overlay_layers: 1,
+            video_muted: false,
+            audio_tracks: Vec::new(),
+            pool: Vec::new(),
             music: None,
             fps: None,
         }
@@ -220,6 +362,39 @@ impl Project {
     pub fn clip_index(&self, id: Uuid) -> Option<usize> {
         self.clips.iter().position(|c| c.id == id)
     }
+    pub fn overlay_index(&self, id: Uuid) -> Option<usize> {
+        self.overlays.iter().position(|c| c.id == id)
+    }
+    pub fn audio_track_index(&self, id: Uuid) -> Option<usize> {
+        self.audio_tracks.iter().position(|t| t.id == id)
+    }
+    /// (track index, clip index) for an audio clip id, searching every track.
+    pub fn audio_clip_index(&self, id: Uuid) -> Option<(usize, usize)> {
+        self.audio_tracks.iter().enumerate().find_map(|(ti, t)| t.clips.iter().position(|c| c.id == id).map(|ci| (ti, ci)))
+    }
+
+    /// Bring a v1 file up to date: the single music bed becomes one "Music" track.
+    pub fn migrate(&mut self) {
+        if let Some(m) = self.music.take() {
+            let media = MediaInfo {
+                duration_ms: m.duration_ms, width: 0, height: 0, fps: Rational { num: 0, den: 1 },
+                codec: String::new(), container: String::new(), has_audio: true,
+                audio_codec: None, sample_rate: None, rotation: 0, is_still: false,
+            };
+            let mut clip = AudioClip::new(m.source, media);
+            clip.source_start = m.trim_start;
+            clip.source_end = m.trim_end;
+            clip.timeline_start = m.timeline_start;
+            clip.volume = m.volume;
+            clip.fade_in = m.fade_in;
+            clip.fade_out = m.fade_out;
+            clip.muted = m.muted;
+            let mut track = AudioTrack::new("Music");
+            track.clips.push(clip);
+            self.audio_tracks.push(track);
+        }
+        self.version = PROJECT_FILE_VERSION;
+    }
 }
 
 impl Default for Project {
@@ -236,7 +411,7 @@ mod tests {
         MediaInfo {
             duration_ms: 4000, width: 1920, height: 1080, fps: Rational { num: 30000, den: 1001 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
 
@@ -318,12 +493,69 @@ mod tests {
     }
 
     #[test]
-    fn audio_track_defaults() {
-        let t = AudioTrack::new(PathBuf::from("/m.m4a"), 9000);
-        assert_eq!((t.trim_start, t.trim_end, t.duration_ms), (0, 9000, 9000));
-        assert_eq!(t.volume, 0.5, "music defaults to a bed level");
-        assert_eq!(t.timeline_start, 0);
-        assert!(!t.muted);
+    fn audio_track_and_clip_defaults() {
+        let t = AudioTrack::new("SFX");
+        assert_eq!(t.label, "SFX");
+        assert!(t.clips.is_empty() && !t.muted);
+        let mut m = media();
+        m.width = 0; m.height = 0;
+        let c = AudioClip::new(PathBuf::from("/m.m4a"), m);
+        assert_eq!((c.source_start, c.source_end, c.timeline_start), (0, 4000, 0));
+        assert_eq!(c.volume, 1.0);
+        assert_eq!(c.end_ms(), 4000);
+        assert!(!c.muted);
+    }
+
+    #[test]
+    fn media_kind_and_overlay_defaults() {
+        let v = media();
+        assert_eq!(v.kind(), MediaKind::Video);
+        let mut a = media(); a.width = 0; a.height = 0;
+        assert_eq!(a.kind(), MediaKind::Audio);
+        let mut i = media(); i.is_still = true; i.has_audio = false;
+        assert_eq!(i.kind(), MediaKind::Image);
+        let ov = OverlayClip::new(PathBuf::from("/a.mp4"), v);
+        assert_eq!((ov.source_start, ov.source_end), (0, 4000));
+        assert_eq!(ov.placement, Placement::FULL);
+        let os = OverlayClip::new(PathBuf::from("/l.png"), i);
+        assert_eq!(os.source_end, STILL_DEFAULT_MS);
+        assert_eq!(os.placement, Placement::BADGE);
+        assert_eq!(Placement { scale: 9.0, x: -1.0, y: 2.0 }.clamped(), Placement { scale: 1.0, x: 0.0, y: 1.0 });
+    }
+
+    #[test]
+    fn v1_music_bed_migrates_into_a_music_track() {
+        let mut p = Project::new("old");
+        p.version = 1;
+        p.music = Some(LegacyMusic {
+            source: PathBuf::from("/bed.m4a"), duration_ms: 9000, timeline_start: 2500, trim_start: 1000, trim_end: 8000,
+            volume: 0.3, fade_in: 500, fade_out: 1000, muted: false,
+        });
+        p.migrate();
+        assert!(p.music.is_none());
+        assert_eq!(p.version, PROJECT_FILE_VERSION);
+        assert_eq!(p.audio_tracks.len(), 1);
+        let t = &p.audio_tracks[0];
+        assert_eq!(t.label, "Music");
+        let c = &t.clips[0];
+        assert_eq!((c.source_start, c.source_end, c.timeline_start), (1000, 8000, 2500));
+        assert_eq!((c.fade_in, c.fade_out, c.volume), (500, 1000, 0.3));
+        assert_eq!(c.media.duration_ms, 9000);
+        assert_eq!(c.media.kind(), MediaKind::Audio);
+        // Idempotent and the bed is never written back.
+        p.migrate();
+        assert_eq!(p.audio_tracks.len(), 1);
+        assert!(!serde_json::to_string(&p).unwrap().contains("\"music\""));
+    }
+
+    #[test]
+    fn v1_json_without_new_fields_still_loads() {
+        let j = r#"{"version":1,"id":"6f6f5c1e-0000-4000-8000-000000000000","name":"x","aspect":"Square1x1",
+            "crop":{"scale":1.0,"x":0.5,"y":0.5},"clips":[],"music":null,"fps":null}"#;
+        let p: Project = serde_json::from_str(j).unwrap();
+        assert!(p.overlays.is_empty() && p.audio_tracks.is_empty() && p.pool.is_empty());
+        assert_eq!(p.overlay_layers, 1);
+        assert!(!p.video_muted);
     }
 
     #[test]
@@ -333,7 +565,7 @@ mod tests {
         assert_eq!(p.version, PROJECT_FILE_VERSION);
         assert_eq!(p.aspect, AspectPreset::YouTube16x9);
         assert!(p.crop.is_identity());
-        assert!(p.clips.is_empty() && p.music.is_none() && p.fps.is_none());
+        assert!(p.clips.is_empty() && p.audio_tracks.is_empty() && p.overlays.is_empty() && p.fps.is_none());
         assert_eq!(p.duration_ms(), 0);
         assert_eq!(p.clip_index(Uuid::new_v4()), None);
 
@@ -369,7 +601,13 @@ mod tests {
         c.transition_out = Transition::CrossDissolve { ms: 400 };
         c.fade_in = 100;
         p.clips.push(c);
-        p.music = Some(AudioTrack::new(PathBuf::from("/m.m4a"), 3000));
+        let mut t = AudioTrack::new("Music");
+        let mut am = media(); am.width = 0;
+        t.clips.push(AudioClip::new(PathBuf::from("/m.m4a"), am));
+        p.audio_tracks.push(t);
+        let mut st = media(); st.is_still = true;
+        p.overlays.push(OverlayClip::new(PathBuf::from("/l.png"), st));
+        p.pool.push(PoolItem { id: Uuid::new_v4(), path: PathBuf::from("/a.mp4"), media: media() });
         p.crop = Crop { scale: 1.5, x: 0.2, y: 0.8 };
         let json = serde_json::to_string(&p).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();

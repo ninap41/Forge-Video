@@ -70,11 +70,12 @@ pub fn stream_copy_blockers(p: &Project) -> Vec<String> {
     }
     let c = &p.clips[0];
     if c.fade_in > 0 || c.fade_out > 0 { r.push("fades".into()); }
-    if p.music.is_some() { r.push("music track".into()); }
+    if !p.overlays.is_empty() { r.push("overlay track".into()); }
+    if p.audio_tracks.iter().any(|t| !t.clips.is_empty()) { r.push("audio tracks".into()); }
     if !p.crop.is_identity() { r.push("crop / reposition".into()); }
     if !source_matches_preset(p, p.aspect) { r.push("aspect ratio change".into()); }
     if c.codec_is_copyable() == false { r.push(format!("source codec {}", c.media.codec)); }
-    if c.muted || (c.volume - 1.0).abs() > 1e-3 { r.push("volume change".into()); }
+    if c.muted || p.video_muted || (c.volume - 1.0).abs() > 1e-3 { r.push("volume change".into()); }
     if c.media.has_audio && c.media.audio_codec.as_deref() != Some("aac") { r.push("audio codec".into()); }
     r
 }
@@ -143,7 +144,7 @@ mod tests {
         MediaInfo {
             duration_ms: 5000, width: 1920, height: 1080, fps: Rational { num: 30, den: 1 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
     fn settings() -> ExportSettings {
@@ -203,7 +204,7 @@ mod more_tests {
         MediaInfo {
             duration_ms: 5000, width: w, height: h, fps: Rational { num: 30, den: 1 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
     fn one(m: MediaInfo) -> Project {
@@ -246,8 +247,18 @@ mod more_tests {
         assert!(stream_copy_blockers(&p).is_empty());
 
         let mut p2 = p.clone();
-        p2.music = Some(AudioTrack::new(PathBuf::from("/m.m4a"), 1000));
-        assert_eq!(stream_copy_blockers(&p2), vec!["music track"]);
+        let t = timeline::audio_track_add(&mut p2, "Music");
+        let mut am = media(0, 0);
+        am.duration_ms = 1000;
+        timeline::audio_clip_add(&mut p2, t, AudioClip::new(PathBuf::from("/m.m4a"), am), 0).unwrap();
+        assert_eq!(stream_copy_blockers(&p2), vec!["audio tracks"]);
+        let mut p2 = p.clone();
+        timeline::audio_track_add(&mut p2, "Empty");
+        assert!(stream_copy_blockers(&p2).is_empty(), "an empty track is not a blocker");
+
+        let mut p2 = p.clone();
+        timeline::overlay_add(&mut p2, OverlayClip::new(PathBuf::from("/o.mp4"), media(1280, 720)), 0, 0);
+        assert_eq!(stream_copy_blockers(&p2), vec!["overlay track"]);
 
         let mut p2 = p.clone();
         p2.crop = Crop { scale: 1.5, x: 0.5, y: 0.5 };
@@ -267,6 +278,9 @@ mod more_tests {
         let mut p2 = p.clone();
         p2.clips[0].muted = true;
         assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
+        let mut p2 = p.clone();
+        p2.video_muted = true;
+        assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
 
         let mut p2 = p.clone();
         p2.clips[0].media.audio_codec = Some("pcm_s16le".into());
@@ -275,6 +289,15 @@ mod more_tests {
         let mut p2 = p.clone();
         p2.clips[0].fade_out = 200;
         assert_eq!(stream_copy_blockers(&p2), vec!["fades"]);
+    }
+
+    #[test]
+    fn a_still_on_v1_always_needs_an_encode() {
+        let mut m = media(1920, 1080);
+        m.is_still = true; m.codec = "png".into(); m.has_audio = false; m.audio_codec = None;
+        let p = one(m);
+        assert_eq!(stream_copy_blockers(&p), vec!["source codec png"]);
+        assert_eq!(plan(&p, &settings()).unwrap().strategy, Strategy::HardwareEncode);
     }
 
     #[test]
@@ -291,7 +314,7 @@ mod more_tests {
     fn multiple_clips_short_circuit_with_a_count() {
         let mut p = one(media(1920, 1080));
         timeline::append(&mut p, Clip::new(PathBuf::from("/b.mp4"), media(1920, 1080)));
-        p.music = Some(AudioTrack::new(PathBuf::from("/m.m4a"), 1000));
+        timeline::overlay_add(&mut p, OverlayClip::new(PathBuf::from("/o.mp4"), media(1280, 720)), 0, 0);
         assert_eq!(stream_copy_blockers(&p), vec!["2 clips on the timeline"]);
     }
 

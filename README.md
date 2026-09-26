@@ -156,12 +156,12 @@ Press **?** or click the **?** button at the right of the toolbar to see this li
 | Keys | Action |
 |---|---|
 | Space | Play / pause |
-| S | Split clip at playhead |
+| ⌘ T | Split selected clip at playhead |
 | ⌫ / Delete | Delete selected clip |
 | ← / → | Nudge playhead one frame |
 | ⇧ ← / ⇧ → | Nudge playhead one second |
 | Home / End | Jump to start / end |
-| ⌘ I | Import video… |
+| ⌘ I | Import media… |
 | ⌘ O | Open project… |
 | ⌘ S | Save project |
 | ⇧ ⌘ S | Save project as… |

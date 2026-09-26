@@ -1,8 +1,9 @@
 //! Pure timeline operations. No I/O. Every op leaves the project in a valid, relaid-out state.
-//! Invariant: clips are contiguous (ripple editing); a transition overlaps the following clip.
+//! Invariants: V1 clips are contiguous (ripple editing) and a transition overlaps the following
+//! clip; overlay and audio clips are free-positioned, sorted, and never overlap within a track.
 
 use crate::error::{Error, Result};
-use crate::project::{Clip, Ms, Project, Transition};
+use crate::project::{AudioClip, Clip, Ms, OverlayClip, Placement, Project, Transition};
 use uuid::Uuid;
 
 /// Minimum clip length we allow, so trims/splits can't produce zero-length clips.
@@ -35,6 +36,50 @@ pub fn relayout(p: &mut Project) {
         cursor += p.clips[i].duration_ms();
         cursor = cursor.saturating_sub(p.clips[i].transition_out.duration_ms());
     }
+
+    // Overlay track: clamp each clip to its source, then sort and push apart so nothing overlaps.
+    for o in &mut p.overlays {
+        if !o.media.is_still {
+            o.source_end = o.source_end.min(o.media.duration_ms);
+        }
+        if o.source_end < o.source_start + MIN_CLIP_MS {
+            o.source_end = o.source_start + MIN_CLIP_MS;
+        }
+        let len = o.duration_ms();
+        o.fade_in = o.fade_in.min(len);
+        o.fade_out = o.fade_out.min(len - o.fade_in);
+        o.placement = o.placement.clamped();
+    }
+    p.overlays.sort_by_key(|o| (o.layer, o.timeline_start));
+    let mut end: Ms = 0;
+    let mut layer = u32::MAX;
+    for o in &mut p.overlays {
+        if o.layer != layer { layer = o.layer; end = 0; }
+        o.timeline_start = o.timeline_start.max(end);
+        end = o.end_ms();
+    }
+    let needed = p.overlays.iter().map(|o| o.layer + 1).max().unwrap_or(1);
+    p.overlay_layers = p.overlay_layers.max(needed).max(1);
+
+    // Audio tracks: same rules per track.
+    for t in &mut p.audio_tracks {
+        for c in &mut t.clips {
+            c.source_end = c.source_end.min(c.media.duration_ms);
+            if c.source_end < c.source_start + MIN_CLIP_MS {
+                c.source_start = c.source_end.saturating_sub(MIN_CLIP_MS);
+            }
+            let len = c.duration_ms();
+            c.fade_in = c.fade_in.min(len);
+            c.fade_out = c.fade_out.min(len - c.fade_in);
+            c.volume = c.volume.clamp(0.0, 2.0);
+        }
+        t.clips.sort_by_key(|c| c.timeline_start);
+        let mut end: Ms = 0;
+        for c in &mut t.clips {
+            c.timeline_start = c.timeline_start.max(end);
+            end = c.end_ms();
+        }
+    }
 }
 
 fn idx(p: &Project, id: Uuid) -> Result<usize> {
@@ -50,10 +95,9 @@ pub fn append(p: &mut Project, clip: Clip) {
 pub fn trim(p: &mut Project, id: Uuid, source_start: Ms, source_end: Ms) -> Result<()> {
     let i = idx(p, id)?;
     let c = &mut p.clips[i];
-    let end = source_end.min(c.media.duration_ms);
-    if source_start + MIN_CLIP_MS > end {
-        return Err(Error::InvalidEdit(format!("trim range too short ({source_start}..{end})")));
-    }
+    // Stills have no source length: the range is simply how long the image stays up.
+    let end = if c.media.is_still { source_end } else { source_end.min(c.media.duration_ms) };
+    check_range(source_start, end)?;
     c.source_start = source_start;
     c.source_end = end;
     relayout(p);
@@ -65,14 +109,7 @@ pub fn trim(p: &mut Project, id: Uuid, source_start: Ms, source_end: Ms) -> Resu
 pub fn split(p: &mut Project, id: Uuid, at_timeline_ms: Ms) -> Result<Uuid> {
     let i = idx(p, id)?;
     let c = &p.clips[i];
-    if at_timeline_ms <= c.timeline_start || at_timeline_ms >= c.timeline_start + c.duration_ms() {
-        return Err(Error::InvalidEdit("split point outside clip".into()));
-    }
-    let offset = at_timeline_ms - c.timeline_start;
-    if offset < MIN_CLIP_MS || c.duration_ms() - offset < MIN_CLIP_MS {
-        return Err(Error::InvalidEdit("split would create a clip that is too short".into()));
-    }
-    let cut = c.source_start + offset;
+    let cut = split_point(c.timeline_start, c.source_start, c.duration_ms(), at_timeline_ms)?;
     let mut right = c.clone();
     right.id = Uuid::new_v4();
     right.source_start = cut;
@@ -133,6 +170,389 @@ pub fn locate(p: &Project, t: Ms) -> Option<(usize, Ms)> {
     })
 }
 
+/// Shared by every split: returns the source cut point given a timeline split inside a clip.
+fn split_point(timeline_start: Ms, source_start: Ms, len: Ms, at_timeline_ms: Ms) -> Result<Ms> {
+    if at_timeline_ms <= timeline_start || at_timeline_ms >= timeline_start + len {
+        return Err(Error::InvalidEdit("split point outside clip".into()));
+    }
+    let offset = at_timeline_ms - timeline_start;
+    if offset < MIN_CLIP_MS || len - offset < MIN_CLIP_MS {
+        return Err(Error::InvalidEdit("split would create a clip that is too short".into()));
+    }
+    Ok(source_start + offset)
+}
+
+fn check_range(source_start: Ms, source_end: Ms) -> Result<()> {
+    if source_start + MIN_CLIP_MS > source_end {
+        return Err(Error::InvalidEdit(format!("trim range too short ({source_start}..{source_end})")));
+    }
+    Ok(())
+}
+
+// ---------- Overlay track (V2) ----------
+
+fn oidx(p: &Project, id: Uuid) -> Result<usize> {
+    p.overlay_index(id).ok_or(Error::ClipNotFound(id))
+}
+
+/// A clip that was just placed or moved wins its spot: anything it lands on is pushed after it
+/// (relayout then chains further pushes).
+fn claim(starts: &mut [(Ms, Ms)], winner: usize) {
+    let (ws, we) = starts[winner];
+    for (i, (s, e)) in starts.iter_mut().enumerate() {
+        if i != winner && *s < we && ws < *e {
+            let len = *e - *s;
+            *s = we;
+            *e = we + len;
+        }
+    }
+}
+
+fn claim_overlay(p: &mut Project, winner: usize) {
+    let layer = p.overlays[winner].layer;
+    // Clips on other layers never collide: give them a span that overlaps nothing.
+    let mut spans: Vec<(Ms, Ms)> = p.overlays.iter().map(|o| if o.layer == layer { (o.timeline_start, o.end_ms()) } else { (Ms::MAX, Ms::MAX) }).collect();
+    claim(&mut spans, winner);
+    for (o, (s, _)) in p.overlays.iter_mut().zip(spans) { if o.layer == layer { o.timeline_start = s; } }
+}
+
+fn claim_audio(t: &mut crate::project::AudioTrack, winner: usize) {
+    let mut spans: Vec<(Ms, Ms)> = t.clips.iter().map(|c| (c.timeline_start, c.end_ms())).collect();
+    claim(&mut spans, winner);
+    for (c, (s, _)) in t.clips.iter_mut().zip(spans) { c.timeline_start = s; }
+}
+
+pub fn overlay_add(p: &mut Project, mut clip: OverlayClip, at: Ms, layer: u32) -> Uuid {
+    clip.timeline_start = at;
+    clip.layer = layer;
+    let id = clip.id;
+    p.overlays.push(clip);
+    let i = p.overlays.len() - 1;
+    claim_overlay(p, i);
+    relayout(p);
+    id
+}
+
+pub fn overlay_move(p: &mut Project, id: Uuid, timeline_start: Ms, layer: u32) -> Result<()> {
+    let i = oidx(p, id)?;
+    p.overlays[i].timeline_start = timeline_start;
+    p.overlays[i].layer = layer;
+    claim_overlay(p, i);
+    relayout(p);
+    Ok(())
+}
+
+pub fn overlay_layer_add(p: &mut Project) {
+    p.overlay_layers += 1;
+}
+
+/// Remove an overlay row and everything on it; higher rows shift down. The last row cannot go.
+pub fn overlay_layer_remove(p: &mut Project, layer: u32) -> Result<()> {
+    if p.overlay_layers <= 1 || layer >= p.overlay_layers {
+        return Err(Error::InvalidEdit("cannot remove that overlay layer".into()));
+    }
+    p.overlays.retain(|o| o.layer != layer);
+    for o in &mut p.overlays { if o.layer > layer { o.layer -= 1; } }
+    p.overlay_layers -= 1;
+    relayout(p);
+    Ok(())
+}
+
+pub fn overlay_trim(p: &mut Project, id: Uuid, source_start: Ms, source_end: Ms) -> Result<()> {
+    let i = oidx(p, id)?;
+    let o = &mut p.overlays[i];
+    let (start, end) = if o.media.is_still { (0, source_end) } else { (source_start, source_end.min(o.media.duration_ms)) };
+    check_range(start, end)?;
+    o.source_start = start;
+    o.source_end = end;
+    relayout(p);
+    Ok(())
+}
+
+pub fn overlay_split(p: &mut Project, id: Uuid, at_timeline_ms: Ms) -> Result<Uuid> {
+    let i = oidx(p, id)?;
+    let o = &p.overlays[i];
+    let cut = split_point(o.timeline_start, o.source_start, o.duration_ms(), at_timeline_ms)?;
+    let mut right = o.clone();
+    right.id = Uuid::new_v4();
+    right.fade_in = 0;
+    right.timeline_start = at_timeline_ms;
+    if o.media.is_still {
+        // Stills have no source time: the right half is simply the remaining length.
+        right.source_start = 0;
+        right.source_end = o.source_end - cut;
+    } else {
+        right.source_start = cut;
+    }
+    let left = &mut p.overlays[i];
+    left.source_end = cut;
+    left.fade_out = 0;
+    let new_id = right.id;
+    p.overlays.insert(i + 1, right);
+    relayout(p);
+    Ok(new_id)
+}
+
+pub fn overlay_delete(p: &mut Project, id: Uuid) -> Result<()> {
+    let i = oidx(p, id)?;
+    p.overlays.remove(i);
+    relayout(p);
+    Ok(())
+}
+
+pub fn overlay_set_fades(p: &mut Project, id: Uuid, fade_in: Ms, fade_out: Ms) -> Result<()> {
+    let i = oidx(p, id)?;
+    p.overlays[i].fade_in = fade_in;
+    p.overlays[i].fade_out = fade_out;
+    relayout(p);
+    Ok(())
+}
+
+pub fn overlay_set_placement(p: &mut Project, id: Uuid, placement: Placement) -> Result<()> {
+    let i = oidx(p, id)?;
+    p.overlays[i].placement = placement.clamped();
+    Ok(())
+}
+
+/// Overlays under a timeline position, lowest layer first, with matching source times.
+pub fn locate_overlays(p: &Project, t: Ms) -> Vec<(usize, Ms)> {
+    p.overlays.iter().enumerate().filter(|(_, o)| t >= o.timeline_start && t < o.end_ms()).map(|(i, o)| (i, o.source_start + (t - o.timeline_start))).collect()
+}
+
+// ---------- Audio tracks ----------
+
+fn tidx(p: &Project, id: Uuid) -> Result<usize> {
+    p.audio_track_index(id).ok_or(Error::ClipNotFound(id))
+}
+
+fn aidx(p: &Project, id: Uuid) -> Result<(usize, usize)> {
+    p.audio_clip_index(id).ok_or(Error::ClipNotFound(id))
+}
+
+pub fn audio_track_add(p: &mut Project, label: &str) -> Uuid {
+    let t = crate::project::AudioTrack::new(label.trim().is_empty().then(|| "Audio").unwrap_or(label.trim()));
+    let id = t.id;
+    p.audio_tracks.push(t);
+    id
+}
+
+pub fn audio_track_update(p: &mut Project, id: Uuid, label: &str, muted: bool) -> Result<()> {
+    let i = tidx(p, id)?;
+    if !label.trim().is_empty() {
+        p.audio_tracks[i].label = label.trim().to_string();
+    }
+    p.audio_tracks[i].muted = muted;
+    Ok(())
+}
+
+pub fn audio_track_remove(p: &mut Project, id: Uuid) -> Result<()> {
+    let i = tidx(p, id)?;
+    p.audio_tracks.remove(i);
+    Ok(())
+}
+
+pub fn audio_clip_add(p: &mut Project, track_id: Uuid, mut clip: AudioClip, at: Ms) -> Result<Uuid> {
+    let ti = tidx(p, track_id)?;
+    clip.timeline_start = at;
+    let id = clip.id;
+    p.audio_tracks[ti].clips.push(clip);
+    let ci = p.audio_tracks[ti].clips.len() - 1;
+    claim_audio(&mut p.audio_tracks[ti], ci);
+    relayout(p);
+    Ok(id)
+}
+
+/// Move within or between tracks.
+pub fn audio_clip_move(p: &mut Project, id: Uuid, track_id: Uuid, timeline_start: Ms) -> Result<()> {
+    let (ti, ci) = aidx(p, id)?;
+    let to = tidx(p, track_id)?;
+    let mut c = p.audio_tracks[ti].clips.remove(ci);
+    c.timeline_start = timeline_start;
+    p.audio_tracks[to].clips.push(c);
+    let ci = p.audio_tracks[to].clips.len() - 1;
+    claim_audio(&mut p.audio_tracks[to], ci);
+    relayout(p);
+    Ok(())
+}
+
+pub fn audio_clip_trim(p: &mut Project, id: Uuid, source_start: Ms, source_end: Ms) -> Result<()> {
+    let (ti, ci) = aidx(p, id)?;
+    let c = &mut p.audio_tracks[ti].clips[ci];
+    let end = source_end.min(c.media.duration_ms);
+    check_range(source_start, end)?;
+    c.source_start = source_start;
+    c.source_end = end;
+    relayout(p);
+    Ok(())
+}
+
+pub fn audio_clip_split(p: &mut Project, id: Uuid, at_timeline_ms: Ms) -> Result<Uuid> {
+    let (ti, ci) = aidx(p, id)?;
+    let c = &p.audio_tracks[ti].clips[ci];
+    let cut = split_point(c.timeline_start, c.source_start, c.duration_ms(), at_timeline_ms)?;
+    let mut right = c.clone();
+    right.id = Uuid::new_v4();
+    right.source_start = cut;
+    right.fade_in = 0;
+    right.timeline_start = at_timeline_ms;
+    let left = &mut p.audio_tracks[ti].clips[ci];
+    left.source_end = cut;
+    left.fade_out = 0;
+    let new_id = right.id;
+    p.audio_tracks[ti].clips.insert(ci + 1, right);
+    relayout(p);
+    Ok(new_id)
+}
+
+pub fn audio_clip_delete(p: &mut Project, id: Uuid) -> Result<()> {
+    let (ti, ci) = aidx(p, id)?;
+    p.audio_tracks[ti].clips.remove(ci);
+    relayout(p);
+    Ok(())
+}
+
+pub fn audio_clip_set(p: &mut Project, id: Uuid, volume: f32, fade_in: Ms, fade_out: Ms, muted: bool) -> Result<()> {
+    let (ti, ci) = aidx(p, id)?;
+    let c = &mut p.audio_tracks[ti].clips[ci];
+    c.volume = volume.clamp(0.0, 2.0);
+    c.fade_in = fade_in;
+    c.fade_out = fade_out;
+    c.muted = muted;
+    relayout(p);
+    Ok(())
+}
+
+#[cfg(test)]
+mod track_tests {
+    use super::*;
+    use crate::project::*;
+    use std::path::PathBuf;
+
+    fn vid(ms: Ms) -> MediaInfo {
+        MediaInfo {
+            duration_ms: ms, width: 1280, height: 720, fps: Rational { num: 30, den: 1 },
+            codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
+        }
+    }
+    fn aud(ms: Ms) -> MediaInfo { let mut m = vid(ms); m.width = 0; m.height = 0; m }
+    fn png() -> MediaInfo { let mut m = vid(STILL_DEFAULT_MS); m.is_still = true; m.has_audio = false; m }
+
+    #[test]
+    fn overlays_sort_and_push_apart() {
+        let mut p = Project::new("o");
+        let a = overlay_add(&mut p, OverlayClip::new("/a.mp4".into(), vid(4000)), 3000, 0);
+        let b = overlay_add(&mut p, OverlayClip::new("/b.png".into(), png()), 0, 0);
+        assert_eq!(p.overlays[0].id, b);
+        assert_eq!(p.overlays[1].id, a);
+        // b (5 s) now overlaps a at 3000 → a is pushed to 5000
+        assert_eq!(p.overlays[1].timeline_start, 5000);
+        overlay_move(&mut p, a, 1000, 0).unwrap();
+        // the moved clip wins; b is pushed after it
+        assert_eq!(p.overlays.iter().find(|o| o.id == a).unwrap().timeline_start, 1000);
+        assert_eq!(p.overlays.iter().find(|o| o.id == b).unwrap().timeline_start, 5000);
+        assert_eq!(locate_overlays(&p, 2000), vec![(0, 1000)]);
+        assert!(locate_overlays(&p, 10_000).is_empty());
+        // a second layer: clips there may overlap the first layer freely
+        assert_eq!(p.overlay_layers, 1);
+        overlay_layer_add(&mut p);
+        assert_eq!(p.overlay_layers, 2);
+        let c = overlay_add(&mut p, OverlayClip::new("/c.mp4".into(), vid(4000)), 1500, 1);
+        let co = p.overlays.iter().find(|o| o.id == c).unwrap();
+        assert_eq!((co.layer, co.timeline_start), (1, 1500));
+        assert_eq!(p.overlays.iter().find(|o| o.id == a).unwrap().timeline_start, 1000, "layer 0 untouched");
+        assert_eq!(locate_overlays(&p, 2000).len(), 2);
+        // moving between layers, and removing a layer drops its clips and renumbers
+        overlay_move(&mut p, b, 0, 1).unwrap();
+        assert_eq!(p.overlays.iter().find(|o| o.id == b).unwrap().layer, 1);
+        assert_eq!(p.overlays.iter().find(|o| o.id == c).unwrap().timeline_start, 5000, "pushed by b on layer 1");
+        overlay_add(&mut p, OverlayClip::new("/d.mp4".into(), vid(1000)), 0, 5);
+        assert_eq!(p.overlay_layers, 6, "layers grow to fit");
+        assert!(overlay_layer_remove(&mut p, 9).is_err());
+        overlay_layer_remove(&mut p, 1).unwrap();
+        assert_eq!(p.overlays.len(), 2);
+        assert_eq!(p.overlays.iter().find(|o| o.source.ends_with("d.mp4")).unwrap().layer, 4);
+        assert_eq!(p.overlay_layers, 5);
+        for _ in 0..4 { overlay_layer_remove(&mut p, 1).unwrap(); }
+        assert!(overlay_layer_remove(&mut p, 0).is_err(), "last layer stays");
+    }
+
+    #[test]
+    fn overlay_trim_split_and_fades() {
+        let mut p = Project::new("o");
+        let a = overlay_add(&mut p, OverlayClip::new("/a.mp4".into(), vid(4000)), 0, 0);
+        overlay_trim(&mut p, a, 1000, 99_000).unwrap();
+        assert_eq!((p.overlays[0].source_start, p.overlays[0].source_end), (1000, 4000));
+        assert!(overlay_trim(&mut p, a, 3950, 4000).is_err());
+        overlay_set_fades(&mut p, a, 10_000, 10_000).unwrap();
+        assert_eq!((p.overlays[0].fade_in, p.overlays[0].fade_out), (3000, 0));
+        let r = overlay_split(&mut p, a, 1500).unwrap();
+        assert_eq!(p.overlays[0].source_end, 2500);
+        assert_eq!((p.overlays[1].id, p.overlays[1].source_start, p.overlays[1].timeline_start), (r, 2500, 1500));
+        assert!(overlay_split(&mut p, a, 0).is_err());
+        // stills: trim sets a length, split keeps lengths
+        let s = overlay_add(&mut p, OverlayClip::new("/l.png".into(), png()), 10_000, 0);
+        overlay_trim(&mut p, s, 500, 8000).unwrap();
+        let so = p.overlays.iter().find(|o| o.id == s).unwrap();
+        assert_eq!((so.source_start, so.source_end), (0, 8000), "stills always start at 0");
+        let r2 = overlay_split(&mut p, s, 13_000).unwrap();
+        let (l, r) = (p.overlays.iter().find(|o| o.id == s).unwrap(), p.overlays.iter().find(|o| o.id == r2).unwrap());
+        assert_eq!((l.duration_ms(), r.duration_ms(), r.timeline_start), (3000, 5000, 13_000));
+        overlay_delete(&mut p, s).unwrap();
+        assert!(overlay_delete(&mut p, s).is_err());
+        overlay_set_placement(&mut p, a, Placement { scale: 5.0, x: 0.1, y: 0.2 }).unwrap();
+        assert_eq!(p.overlays[0].placement, Placement { scale: 1.0, x: 0.1, y: 0.2 });
+    }
+
+    #[test]
+    fn stills_on_v1_stretch_freely() {
+        let mut p = Project::new("s");
+        append(&mut p, Clip::new("/l.png".into(), png()));
+        let id = p.clips[0].id;
+        assert_eq!(p.duration_ms(), STILL_DEFAULT_MS);
+        trim(&mut p, id, 0, 12_000).unwrap();
+        assert_eq!(p.duration_ms(), 12_000);
+        assert!(trim(&mut p, id, 0, 50).is_err());
+        let r = split(&mut p, id, 4000).unwrap();
+        assert_eq!((p.clips[0].source_end, p.clips[1].id, p.clips[1].source_start), (4000, r, 4000));
+    }
+
+    #[test]
+    fn audio_tracks_and_clips() {
+        let mut p = Project::new("a");
+        let music = audio_track_add(&mut p, "Music");
+        let sfx = audio_track_add(&mut p, "   ");
+        assert_eq!(p.audio_tracks[1].label, "Audio");
+        audio_track_update(&mut p, sfx, "SFX", true).unwrap();
+        assert_eq!((p.audio_tracks[1].label.as_str(), p.audio_tracks[1].muted), ("SFX", true));
+        let a = audio_clip_add(&mut p, music, AudioClip::new("/m.m4a".into(), aud(9000)), 2000).unwrap();
+        let b = audio_clip_add(&mut p, music, AudioClip::new("/n.m4a".into(), aud(1000)), 2500).unwrap();
+        // the dropped clip wins its spot; the 9 s clip it landed on is pushed after it
+        assert_eq!(p.audio_tracks[0].clips[0].id, b);
+        assert_eq!(p.audio_tracks[0].clips[1].id, a);
+        assert_eq!(p.audio_tracks[0].clips[1].timeline_start, 3500);
+        audio_clip_move(&mut p, b, sfx, 0).unwrap();
+        assert_eq!(p.audio_tracks[0].clips.len(), 1);
+        assert_eq!(p.audio_tracks[1].clips[0].id, b);
+        assert!(audio_clip_move(&mut p, b, Uuid::new_v4(), 0).is_err());
+        audio_clip_move(&mut p, a, music, 2000).unwrap();
+        audio_clip_trim(&mut p, a, 1000, 99_000).unwrap();
+        assert_eq!(p.audio_tracks[0].clips[0].source_end, 9000);
+        audio_clip_set(&mut p, a, 5.0, 100_000, 5, true).unwrap();
+        let c = &p.audio_tracks[0].clips[0];
+        assert_eq!((c.volume, c.fade_in, c.fade_out, c.muted), (2.0, 8000, 0, true));
+        let r = audio_clip_split(&mut p, a, 6000).unwrap();
+        assert_eq!(p.audio_tracks[0].clips[0].source_end, 5000);
+        assert_eq!((p.audio_tracks[0].clips[1].id, p.audio_tracks[0].clips[1].timeline_start), (r, 6000));
+        audio_clip_delete(&mut p, r).unwrap();
+        assert!(audio_clip_delete(&mut p, r).is_err());
+        audio_track_remove(&mut p, music).unwrap();
+        assert!(audio_track_remove(&mut p, music).is_err());
+        assert_eq!(p.audio_tracks.len(), 1);
+        assert_eq!(p.duration_ms(), 0, "audio never defines the project length");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,7 +563,7 @@ mod tests {
         MediaInfo {
             duration_ms: ms, width: 1280, height: 720, fps: Rational { num: 30, den: 1 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
     fn proj(lens: &[Ms]) -> Project {
@@ -245,7 +665,7 @@ mod edge_tests {
         MediaInfo {
             duration_ms: ms, width: 1280, height: 720, fps: Rational { num: 30, den: 1 },
             codec: "h264".into(), container: "mov,mp4".into(), has_audio: true,
-            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0,
+            audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false,
         }
     }
     fn proj(lens: &[Ms]) -> Project {

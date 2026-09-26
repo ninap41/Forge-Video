@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
-import { ASPECT_PRESETS, clipDuration, type Transition } from "../types/project";
+import MuteToggle from "./MuteToggle.vue";
+import { ASPECT_PRESETS, PLACEMENT_BADGE, PLACEMENT_FULL, clipDuration, type Transition } from "../types/project";
 import { basename, fmtMs } from "../utils/time";
 
 const store = useProjectStore();
 const clip = computed(() => store.selectedClip);
 const isLast = computed(() => store.selectedIndex === store.clips.length - 1);
-const music = computed(() => store.project?.music ?? null);
+const ov = computed(() => store.selectedOverlay);
+const au = computed(() => store.selectedAudio);
 
 // Debounced slider commits: sliders update a local copy, commit on change (pointer release).
 const fades = ref({ fi: 0, fo: 0 });
@@ -31,14 +32,20 @@ const commitTransition = () => {
 
 const maxFade = computed(() => (clip.value ? Math.min(5000, clipDuration(clip.value)) : 0));
 
-const m = ref({ volume: 0.5, fade_in: 0, fade_out: 0, timeline_start: 0, muted: false });
-watch(music, (t) => { if (t) m.value = { volume: t.volume, fade_in: t.fade_in, fade_out: t.fade_out, timeline_start: t.timeline_start, muted: t.muted }; }, { immediate: true, deep: true });
-const commitMusic = () => music.value && store.updateMusic({ ...music.value, ...m.value });
+// Overlay clip: fades, length (stills), size.
+const o = ref({ fi: 0, fo: 0, len: 5000, scale: 0.35 });
+watch(ov, (c) => { if (c) o.value = { fi: c.fade_in, fo: c.fade_out, len: clipDuration(c), scale: c.placement.scale }; }, { immediate: true, deep: true });
+const ovMaxFade = computed(() => (ov.value ? Math.min(5000, clipDuration(ov.value)) : 0));
+const commitOvFades = () => ov.value && store.overlaySetFades(ov.value.id, o.value.fi, o.value.fo);
+const commitOvLen = () => ov.value && store.overlayTrim(ov.value.id, 0, Math.max(100, Math.round(o.value.len)));
+const commitOvScale = () => ov.value && store.overlaySetPlacement(ov.value.id, { ...ov.value.placement, scale: o.value.scale });
+const resetPlacement = () => ov.value && store.overlaySetPlacement(ov.value.id, ov.value.media.is_still ? { ...PLACEMENT_BADGE } : { ...PLACEMENT_FULL });
 
-async function pickMusic() {
-  const p = await open({ multiple: false, filters: [{ name: "Audio", extensions: ["mp3", "m4a", "aac", "wav", "aiff", "flac", "mp4", "mov"] }] });
-  if (typeof p === "string") await store.setMusic(p);
-}
+// Audio clip: volume, fades, mute; plus its track's label/mute.
+const a = ref({ v: 1, fi: 0, fo: 0, muted: false });
+watch(au, (x) => { if (x) a.value = { v: x.clip.volume, fi: x.clip.fade_in, fo: x.clip.fade_out, muted: x.clip.muted }; }, { immediate: true, deep: true });
+const auMaxFade = computed(() => (au.value ? Math.min(10_000, clipDuration(au.value.clip)) : 0));
+const commitAudio = () => au.value && store.audioClipSet(au.value.clip.id, a.value.v, a.value.fi, a.value.fo, a.value.muted);
 
 const crop = computed(() => store.project?.crop ?? { scale: 1, x: 0.5, y: 0.5 });
 const cropScale = ref(1);
@@ -111,52 +118,91 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
           <input type="range" min="0" max="2" step="0.05" v-model.number="vol.v" class="flex-1" :disabled="!clip.media.has_audio" @change="commitVolume" />
           <span class="w-10 text-right font-mono">{{ Math.round(vol.v * 100) }}%</span>
         </label>
-        <label class="flex items-center gap-2 mt-1 cursor-pointer">
-          <input type="checkbox" v-model="vol.muted" :disabled="!clip.media.has_audio" @change="commitVolume" /> Mute clip audio
-        </label>
+        <div class="flex items-center gap-2 mt-1" :class="!clip.media.has_audio ? 'opacity-40' : ''">
+          <MuteToggle :muted="vol.muted" label="clip audio" :disabled="!clip.media.has_audio" @toggle="vol.muted = !vol.muted; commitVolume()" />
+          <span class="text-muted">{{ vol.muted ? 'Clip audio muted' : 'Clip audio on' }}</span>
+        </div>
 
         <div class="flex gap-1 mt-3">
-          <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" :disabled="!store.current || store.current.clip.id !== clip.id" @click="store.splitAtPlayhead()">Split at playhead (S)</button>
+          <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" :disabled="!store.current || store.current.clip.id !== clip.id" @click="store.splitAtPlayhead()">Split at playhead (⌘T)</button>
           <button class="rounded border border-line px-2 py-1 text-danger hover:border-danger" @click="store.deleteClip(clip.id)">Delete</button>
         </div>
       </template>
     </section>
 
-    <!-- Music -->
-    <section class="p-3">
-      <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Music</h3>
-      <div v-if="!music">
-        <button class="rounded border border-line px-2 py-1 hover:border-muted" @click="pickMusic">Add music track…</button>
+    <!-- Overlay clip (V2) -->
+    <section v-if="ov" class="p-3 border-b border-line">
+      <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Overlay</h3>
+      <div class="font-medium truncate" :title="ov.source">{{ basename(ov.source) }}</div>
+      <div class="text-muted mb-2">
+        {{ ov.media.is_still ? 'Still image' : 'Video (silent)' }} · {{ ov.media.width }}×{{ ov.media.height }}
+        <br />At {{ fmtMs(ov.timeline_start) }} · {{ fmtMs(clipDuration(ov)) }}
       </div>
-      <template v-else>
-        <div class="flex items-center gap-2">
-          <span class="font-medium truncate flex-1" :title="music.source">{{ basename(music.source) }}</span>
-          <button class="text-muted hover:text-fg" @click="pickMusic">Change</button>
-          <button class="text-danger" @click="store.setMusic(null)">Remove</button>
-        </div>
-        <label class="flex items-center gap-2 mt-2">
-          <span class="w-14 text-muted">Volume</span>
-          <input type="range" min="0" max="1.5" step="0.05" v-model.number="m.volume" class="flex-1" @change="commitMusic" />
-          <span class="w-10 text-right font-mono">{{ Math.round(m.volume * 100) }}%</span>
-        </label>
-        <label class="flex items-center gap-2 mt-1">
-          <span class="w-14 text-muted">Start at</span>
-          <input type="range" min="0" :max="Math.max(0, store.duration)" step="100" v-model.number="m.timeline_start" class="flex-1" @change="commitMusic" />
-          <span class="w-10 text-right font-mono">{{ fmtMs(m.timeline_start) }}</span>
-        </label>
-        <label class="flex items-center gap-2 mt-1">
-          <span class="w-14 text-muted">Fade in</span>
-          <input type="range" min="0" max="10000" step="100" v-model.number="m.fade_in" class="flex-1" @change="commitMusic" />
-          <span class="w-10 text-right font-mono">{{ (m.fade_in / 1000).toFixed(1) }}s</span>
-        </label>
-        <label class="flex items-center gap-2 mt-1">
-          <span class="w-14 text-muted">Fade out</span>
-          <input type="range" min="0" max="10000" step="100" v-model.number="m.fade_out" class="flex-1" @change="commitMusic" />
-          <span class="w-10 text-right font-mono">{{ (m.fade_out / 1000).toFixed(1) }}s</span>
-        </label>
-        <label class="flex items-center gap-2 mt-1 cursor-pointer"><input type="checkbox" v-model="m.muted" @change="commitMusic" /> Mute</label>
-        <div class="text-muted/70 mt-1">Music is trimmed to the video length on export.</div>
-      </template>
+      <label v-if="ov.media.is_still" class="flex items-center gap-2 mt-2">
+        <span class="w-14 text-muted">Length</span>
+        <input type="range" min="100" :max="Math.max(30000, o.len)" step="100" v-model.number="o.len" class="flex-1" @change="commitOvLen" />
+        <span class="w-10 text-right font-mono">{{ (o.len / 1000).toFixed(1) }}s</span>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Size</span>
+        <input type="range" min="0.05" max="1" step="0.01" v-model.number="o.scale" class="flex-1" @change="commitOvScale" />
+        <span class="w-10 text-right font-mono">{{ Math.round(o.scale * 100) }}%</span>
+      </label>
+      <button class="mt-1 text-muted hover:text-fg" @click="resetPlacement">Reset placement</button>
+      <label class="flex items-center gap-2 mt-2">
+        <span class="w-14 text-muted">Fade in</span>
+        <input type="range" min="0" :max="ovMaxFade" step="50" v-model.number="o.fi" class="flex-1" @change="commitOvFades" />
+        <span class="w-10 text-right font-mono">{{ (o.fi / 1000).toFixed(2) }}s</span>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Fade out</span>
+        <input type="range" min="0" :max="ovMaxFade" step="50" v-model.number="o.fo" class="flex-1" @change="commitOvFades" />
+        <span class="w-10 text-right font-mono">{{ (o.fo / 1000).toFixed(2) }}s</span>
+      </label>
+      <div class="text-muted/70 mt-1">Drag it in the preview to place · scroll to resize.</div>
+      <div class="flex gap-1 mt-3">
+        <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" @click="store.splitAtPlayhead()">Split at playhead (⌘T)</button>
+        <button class="rounded border border-line px-2 py-1 text-danger hover:border-danger" @click="store.deleteSelected()">Delete</button>
+      </div>
+    </section>
+
+    <!-- Audio clip -->
+    <section v-if="au" class="p-3 border-b border-line">
+      <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Audio · {{ au.track.label }}</h3>
+      <div class="font-medium truncate" :title="au.clip.source">{{ basename(au.clip.source) }}</div>
+      <div class="text-muted mb-2">At {{ fmtMs(au.clip.timeline_start) }} · In {{ fmtMs(au.clip.source_start) }} · Out {{ fmtMs(au.clip.source_end) }} · {{ fmtMs(clipDuration(au.clip)) }}</div>
+      <label class="flex items-center gap-2 mt-2">
+        <span class="w-14 text-muted">Volume</span>
+        <input type="range" min="0" max="2" step="0.05" v-model.number="a.v" class="flex-1" @change="commitAudio" />
+        <span class="w-10 text-right font-mono">{{ Math.round(a.v * 100) }}%</span>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Fade in</span>
+        <input type="range" min="0" :max="auMaxFade" step="100" v-model.number="a.fi" class="flex-1" @change="commitAudio" />
+        <span class="w-10 text-right font-mono">{{ (a.fi / 1000).toFixed(1) }}s</span>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Fade out</span>
+        <input type="range" min="0" :max="auMaxFade" step="100" v-model.number="a.fo" class="flex-1" @change="commitAudio" />
+        <span class="w-10 text-right font-mono">{{ (a.fo / 1000).toFixed(1) }}s</span>
+      </label>
+      <div class="flex items-center gap-2 mt-1">
+        <MuteToggle :muted="a.muted" label="clip" @toggle="a.muted = !a.muted; commitAudio()" />
+        <span class="text-muted">{{ a.muted ? 'Clip muted' : 'Clip audio on' }}</span>
+      </div>
+      <div class="flex items-center gap-2 mt-1">
+        <MuteToggle :muted="au.track.muted" label="track" @toggle="store.audioTrackUpdate(au.track.id, au.track.label, !au.track.muted)" />
+        <span class="text-muted">Track “{{ au.track.label }}” {{ au.track.muted ? 'muted' : 'on' }}</span>
+      </div>
+      <div class="text-muted/70 mt-1">Audio is trimmed to the video length on export.</div>
+      <div class="flex gap-1 mt-3">
+        <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" @click="store.splitAtPlayhead()">Split at playhead (⌘T)</button>
+        <button class="rounded border border-line px-2 py-1 text-danger hover:border-danger" @click="store.deleteSelected()">Delete</button>
+      </div>
+    </section>
+
+    <section v-if="!ov && !au" class="p-3 text-muted/70">
+      Overlays (V2) and audio clips show their controls here when selected. Rename tracks in the timeline gutter.
     </section>
   </aside>
 </template>

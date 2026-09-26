@@ -2,12 +2,12 @@
 // Single source of truth for the hot-key list (also asserted by App.test.ts and mirrored in README.md).
 export const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Space", action: "Play / pause" },
-  { keys: "S", action: "Split clip at playhead" },
+  { keys: "⌘ T", action: "Split selected clip at playhead" },
   { keys: "⌫ / Delete", action: "Delete selected clip" },
   { keys: "← / →", action: "Nudge playhead one frame" },
   { keys: "⇧ ← / ⇧ →", action: "Nudge playhead one second" },
   { keys: "Home / End", action: "Jump to start / end" },
-  { keys: "⌘ I", action: "Import video…" },
+  { keys: "⌘ I", action: "Import media…" },
   { keys: "⌘ O", action: "Open project…" },
   { keys: "⌘ S", action: "Save project" },
   { keys: "⇧ ⌘ S", action: "Save project as…" },
@@ -18,11 +18,14 @@ export const SHORTCUTS: { keys: string; action: string }[] = [
 
 export const MOUSE: { keys: string; action: string }[] = [
   { keys: "Drag clip edge", action: "Trim in / out point (frame-snapped)" },
-  { keys: "Drag clip", action: "Reorder clips" },
+  { keys: "Drag V1 clip", action: "Reorder clips" },
+  { keys: "Drag overlay / audio clip", action: "Move it in time, or to another layer / track" },
+  { keys: "Drag from media pool", action: "Place on a track at that time" },
+  { keys: "Double-click pool item", action: "Place it at the playhead" },
   { keys: "Click ruler / drag", action: "Scrub the playhead" },
-  { keys: "Drag preview", action: "Reposition the crop" },
-  { keys: "Scroll on preview", action: "Zoom the crop" },
-  { keys: "Drop video file", action: "Import" },
+  { keys: "Drag preview", action: "Reposition the crop, or place the selected overlay" },
+  { keys: "Scroll on preview", action: "Zoom the crop, or resize the selected overlay" },
+  { keys: "Drop media files", action: "Add to the media pool" },
 ];
 </script>
 

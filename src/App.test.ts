@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { baseProject, project, resolveWith, type MockApi } from "./test/fixtures";
+import { baseProject, fakeSplit, project, resolveWith, type MockApi } from "./test/fixtures";
 
 vi.mock("./api/tauri", async () => {
   const f = await import("./test/fixtures");
@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTitle }
 import App from "./App.vue";
 import { useProjectStore } from "./stores/project";
 import { SHORTCUTS } from "./components/HelpDialog.vue";
+import ClipBlock from "./components/ClipBlock.vue";
 
 const base = baseProject();
 
@@ -81,32 +82,33 @@ describe("App shell", () => {
     expect(btn(w, "Export…").attributes("disabled")).toBeDefined();
   });
 
-  it("imports dropped video files, ignoring other types and hover events", async () => {
+  it("adds dropped media files to the pool, ignoring other types and hover events", async () => {
     const { store } = await setup();
     expect(dropHandler).toBeDefined();
     dropHandler!({ payload: { type: "enter", paths: ["/v/a.mp4"] } });
-    dropHandler!({ payload: { type: "drop", paths: ["/v/a.MOV", "/docs/notes.txt", "/v/b.mkv", "/audio/x.m4a"] } });
+    dropHandler!({ payload: { type: "drop", paths: ["/v/a.MOV", "/docs/notes.txt", "/v/b.mkv", "/audio/x.m4a", "/img/logo.PNG"] } });
     await flush();
-    expect(api.mediaImport.mock.calls).toEqual([["/v/a.MOV"], ["/v/b.mkv"]]);
+    expect(api.poolAdd.mock.calls).toEqual([["/v/a.MOV"], ["/v/b.mkv"], ["/audio/x.m4a"], ["/img/logo.PNG"]]);
+    expect(api.mediaImport).not.toHaveBeenCalled();
     dropHandler!({ payload: { type: "drop", paths: ["/docs/notes.txt"] } });
     await flush();
-    expect(api.mediaImport).toHaveBeenCalledTimes(2);
+    expect(api.poolAdd).toHaveBeenCalledTimes(4);
     expect(store.clips).toHaveLength(2);
   });
 
   it("Import… button uses the file dialog for one or many files", async () => {
     const { w } = await setup();
     dialog.open.mockResolvedValueOnce(["/v/1.mp4", "/v/2.mp4"]);
-    await btn(w, "Import video").trigger("click");
+    await btn(w, "Import…").trigger("click");
     await flush();
     expect(dialog.open).toHaveBeenCalledWith(expect.objectContaining({ multiple: true }));
     expect(api.mediaImport.mock.calls).toEqual([["/v/1.mp4"], ["/v/2.mp4"]]);
     dialog.open.mockResolvedValueOnce("/v/3.mp4");
-    await btn(w, "Import video").trigger("click");
+    await btn(w, "Import…").trigger("click");
     await flush();
     expect(api.mediaImport).toHaveBeenLastCalledWith("/v/3.mp4");
     dialog.open.mockResolvedValueOnce(null);
-    await btn(w, "Import video").trigger("click");
+    await btn(w, "Import…").trigger("click");
     await flush();
     expect(api.mediaImport).toHaveBeenCalledTimes(3);
   });
@@ -171,16 +173,49 @@ describe("keyboard shortcuts", () => {
     expect(store.playing).toBe(false);
   });
 
-  it("S splits at the playhead; ⌘S saves instead", async () => {
-    const { store } = await setup();
+  it("⌘T splits at the playhead and the timeline shows both halves; a bare S or T does nothing; ⌘S saves", async () => {
+    const { store, w } = await setup();
+    api.clipSplit.mockImplementation((id: string, at: number) => Promise.resolve(fakeSplit(store.project!, id, at)));
+    store.select("a");
     store.playhead = 2000;
     key({ key: "s" });
+    key({ key: "t" });
+    await flush();
+    expect(api.clipSplit).not.toHaveBeenCalled();
+    key({ key: "t", metaKey: true });
     await flush();
     expect(api.clipSplit).toHaveBeenCalledWith("a", 2000);
+    expect(store.clips.map((c) => [c.id, c.source_start, c.source_end, c.timeline_start])).toEqual([
+      ["a", 0, 2000, 0], ["a-split", 2000, 5000, 2000], ["b", 0, 4000, 5000],
+    ]);
+    expect(store.selectedClipId).toBe("a-split");
+    expect(store.error).toBeNull();
+    await w.vm.$nextTick();
+    expect(w.text()).toContain("3 clips");
+    expect(w.findAllComponents(ClipBlock)).toHaveLength(3);
+    // ctrl works like ⌘ on the same key
+    store.playhead = 7000;
+    key({ key: "t", ctrlKey: true });
+    await flush();
+    expect(store.clips).toHaveLength(4);
     key({ key: "s", metaKey: true });
     await flush();
     expect(api.projectSave).toHaveBeenCalled();
-    expect(api.clipSplit).toHaveBeenCalledTimes(1);
+    expect(api.clipSplit).toHaveBeenCalledTimes(2);
+  });
+
+  it("the timeline panel is resizable and remembers its height", async () => {
+    const { store, w } = await setup();
+    const h0 = store.timelineHeight;
+    const handle = w.find("[data-testid=timeline-resize]");
+    await handle.trigger("pointerdown", { clientY: 500, pointerId: 1 });
+    await handle.trigger("pointermove", { clientY: 440 });
+    await handle.trigger("pointerup");
+    expect(store.timelineHeight).toBe(h0 + 60);
+    await handle.trigger("pointerdown", { clientY: 500, pointerId: 1 });
+    await handle.trigger("pointermove", { clientY: 2000 });
+    await handle.trigger("pointerup");
+    expect(store.timelineHeight).toBe(200);
   });
 
   it("Backspace/Delete remove the selected clip only", async () => {
