@@ -1,5 +1,18 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Quicksand";
+  src: url("./assets/fonts/Quicksand-VariableFont_wght.ttf") format("truetype");
+  font-weight: 300 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Orbit";
+  src: url("./assets/fonts/Orbit-Regular.ttf") format("truetype");
+  font-weight: normal;
+  font-display: swap;
+}
+
 @theme {
   --color-bg: #121214;
   --color-panel: #1b1b1f;
@@ -7,9 +20,11 @@
   --color-line: #2e2e35;
   --color-fg: #e8e8ec;
   --color-muted: #8b8b95;
-  --color-accent: #f5a524;
+  --color-accent: #47d39d;
+  --color-accent-deep: #095945;
   --color-accent-2: #3b82f6;
   --color-danger: #ef4444;
+  --font-display: "Quicksand", -apple-system, sans-serif;
 }
 
 html, body, #app { height: 100%; margin: 0; background: var(--color-bg); color: var(--color-fg);
