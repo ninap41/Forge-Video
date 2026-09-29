@@ -32,6 +32,18 @@ struct Stream {
     tags: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     side_data_list: Vec<serde_json::Value>,
+    #[serde(default)]
+    disposition: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Album art inside an mp3/m4a/flac shows up as a "video" stream; it must not make the file a clip.
+/// Flagged `attached_pic`, or a still codec beside audio with no real frame rate (an MJPEG camera
+/// clip reports a positive `avg_frame_rate`; a cover reports 0/0 or nothing).
+fn is_cover_art(s: &Stream, has_audio: bool) -> bool {
+    let attached = s.disposition.get("attached_pic").and_then(|v| v.as_i64()).unwrap_or(0) != 0;
+    let still_codec = s.codec_name.as_deref().is_some_and(|c| STILL_CODECS.contains(&c));
+    let plays = s.avg_frame_rate.as_deref().and_then(parse_rational).is_some_and(|r| r.num > 0);
+    attached || (has_audio && still_codec && !plays)
 }
 
 fn parse_rational(s: &str) -> Option<Rational> {
@@ -55,10 +67,10 @@ fn rotation_of(s: &Stream) -> i32 {
 
 pub fn parse_probe_json(json: &str) -> Result<MediaInfo> {
     let out: ProbeOut = serde_json::from_str(json)?;
-    let video = out.streams.iter().find(|s| s.codec_type.as_deref() == Some("video"));
     let audio = out.streams.iter().find(|s| s.codec_type.as_deref() == Some("audio"));
+    let video = out.streams.iter().find(|s| s.codec_type.as_deref() == Some("video") && !is_cover_art(s, audio.is_some()));
     let fmt = out.format.as_ref();
-    if let Some(v) = video.filter(|v| is_still(v, fmt)) {
+    if let Some(v) = video.filter(|v| is_still(v, fmt, audio.is_some())) {
         // A still image: no intrinsic duration, no audio. Gets a default on-screen length.
         return Ok(MediaInfo {
             duration_ms: STILL_DEFAULT_MS,
@@ -77,7 +89,8 @@ pub fn parse_probe_json(json: &str) -> Result<MediaInfo> {
     let duration_ms = fmt
         .and_then(|f| f.duration.as_deref())
         .and_then(parse_secs_to_ms)
-        .or_else(|| video.or(audio).and_then(|s| s.duration.as_deref()).and_then(parse_secs_to_ms))
+        .or_else(|| video.and_then(|s| s.duration.as_deref()).and_then(parse_secs_to_ms))
+        .or_else(|| audio.and_then(|s| s.duration.as_deref()).and_then(parse_secs_to_ms))
         .ok_or_else(|| Error::Media("no duration".into()))?;
     if video.is_none() && audio.is_none() {
         return Err(Error::Media("no video or audio stream".into()));
@@ -103,10 +116,13 @@ pub fn parse_probe_json(json: &str) -> Result<MediaInfo> {
 
 const STILL_CODECS: &[&str] = &["png", "mjpeg", "webp", "bmp", "tiff", "gif"];
 
-fn is_still(v: &Stream, fmt: Option<&Format>) -> bool {
+/// A still is an image container, or a still codec with neither a container duration nor audio.
+/// An MJPEG .avi/.mov (old cameras) has both and is an ordinary clip.
+fn is_still(v: &Stream, fmt: Option<&Format>, has_audio: bool) -> bool {
     let codec_still = v.codec_name.as_deref().is_some_and(|c| STILL_CODECS.contains(&c));
     let fmt_still = fmt.and_then(|f| f.format_name.as_deref()).is_some_and(|f| f.ends_with("_pipe") || f == "image2");
-    codec_still || fmt_still
+    let timed = fmt.and_then(|f| f.duration.as_deref()).and_then(parse_secs_to_ms).is_some_and(|d| d > 0);
+    fmt_still || (codec_still && !timed && !has_audio)
 }
 
 pub async fn probe(path: &Path) -> Result<MediaInfo> {
@@ -135,9 +151,24 @@ mod still_tests {
         assert_eq!((m.width, m.height), (400, 300));
         assert!(!m.has_audio);
         assert_eq!(m.kind(), crate::project::MediaKind::Image);
-        // an mjpeg *video* with a duration is not a still
-        let j = r#"{"streams":[{"codec_type":"video","codec_name":"h264","width":4,"height":4}],"format":{"format_name":"mov,mp4","duration":"2"}}"#;
-        assert!(!parse_probe_json(j).unwrap().is_still);
+        // an mjpeg *video* with a duration (old camera .avi) is a clip that keeps its audio and length
+        let j = r#"{"streams":[{"codec_type":"video","codec_name":"mjpeg","width":640,"height":480,"r_frame_rate":"30/1","avg_frame_rate":"30/1"},
+            {"codec_type":"audio","codec_name":"pcm_s16le","sample_rate":"48000"}],"format":{"format_name":"avi","duration":"12.5"}}"#;
+        let m = parse_probe_json(j).unwrap();
+        assert!(!m.is_still);
+        assert!(m.has_audio);
+        assert_eq!(m.duration_ms, 12_500);
+        assert_eq!(m.kind(), crate::project::MediaKind::Video);
+        // a jpeg from a container that reports no duration is still a still
+        let j = r#"{"streams":[{"codec_type":"video","codec_name":"mjpeg","width":640,"height":480}],"format":{"format_name":"image2"}}"#;
+        assert!(parse_probe_json(j).unwrap().is_still);
+    }
+
+    #[test]
+    fn duration_falls_back_to_the_audio_stream() {
+        let j = r#"{"streams":[{"codec_type":"video","codec_name":"h264","width":16,"height":16},
+            {"codec_type":"audio","codec_name":"aac","duration":"3.25"}],"format":{"format_name":"mov"}}"#;
+        assert_eq!(parse_probe_json(j).unwrap().duration_ms, 3250);
     }
 
     #[tokio::test]
@@ -282,6 +313,33 @@ mod more_tests {
         assert_eq!((m.width, m.height), (3840, 2160));
         assert_eq!(m.audio_codec.as_deref(), Some("mp3"));
         assert_eq!(m.duration_ms, 9999);
+    }
+
+    #[test]
+    fn album_art_does_not_turn_audio_into_video_or_a_still() {
+        // mp3 with an ID3 cover: ffprobe reports an mjpeg "video" stream flagged attached_pic.
+        let j = r#"{"streams":[
+            {"codec_type":"audio","codec_name":"mp3","sample_rate":"44100"},
+            {"codec_type":"video","codec_name":"mjpeg","width":600,"height":600,"avg_frame_rate":"0/0","r_frame_rate":"90000/1","disposition":{"attached_pic":1}}],
+            "format":{"format_name":"mp3","duration":"180.5"}}"#;
+        let m = parse_probe_json(j).unwrap();
+        assert!(!m.is_still);
+        assert_eq!((m.width, m.height), (0, 0));
+        assert!(m.has_audio);
+        assert_eq!(m.audio_codec.as_deref(), Some("mp3"));
+        assert_eq!(m.duration_ms, 180_500);
+        assert_eq!(m.kind(), crate::project::MediaKind::Audio);
+        // a png cover without the disposition flag (some taggers) is still cover art when audio is present
+        let j = r#"{"streams":[
+            {"codec_type":"video","codec_name":"png","width":300,"height":300},
+            {"codec_type":"audio","codec_name":"flac","sample_rate":"96000"}],
+            "format":{"format_name":"flac","duration":"12"}}"#;
+        let m = parse_probe_json(j).unwrap();
+        assert_eq!(m.kind(), crate::project::MediaKind::Audio);
+        assert_eq!(m.width, 0);
+        // a real video with mjpeg frames and audio is untouched only when flagged, so an mjpeg-only clip stays a still/clip as before
+        let j = r#"{"streams":[{"codec_type":"video","codec_name":"png","width":400,"height":300}],"format":{"format_name":"png_pipe"}}"#;
+        assert!(parse_probe_json(j).unwrap().is_still);
     }
 
     #[tokio::test]

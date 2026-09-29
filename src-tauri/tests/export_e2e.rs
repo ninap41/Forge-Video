@@ -122,3 +122,69 @@ async fn overlay_png_and_video_over_v1_with_two_audio_tracks() {
     assert!(mi.has_audio);
     assert!((4800..=5200).contains(&mi.duration_ms), "audio must not extend past V1: {}", mi.duration_ms);
 }
+
+/// Render a short synthetic file with ffmpeg; None when this ffmpeg build lacks the encoder.
+async fn synth(dir: &std::path::Path, name: &str, args: &[&str]) -> Option<PathBuf> {
+    let out = dir.join(name);
+    let mut cmd = tokio::process::Command::new("ffmpeg");
+    cmd.args(["-v", "error", "-y"]).args(args).arg(&out);
+    let st = cmd.output().await.ok()?;
+    if !st.status.success() {
+        eprintln!("skipping {name}: {}", String::from_utf8_lossy(&st.stderr));
+        return None;
+    }
+    Some(out)
+}
+const SINE: &[&str] = &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=3"];
+
+#[tokio::test]
+async fn many_audio_and_video_formats_probe_and_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mp3 = synth(d, "a.mp3", &[SINE, &["-c:a", "libmp3lame"]].concat()).await;
+    let wav = synth(d, "a.wav", &[SINE, &["-c:a", "pcm_s16le"]].concat()).await;
+    let flac = synth(d, "a.flac", &[SINE, &["-c:a", "flac"]].concat()).await;
+    let aiff = synth(d, "a.aiff", &[SINE, &["-c:a", "pcm_s16be"]].concat()).await;
+    let logo = fixture("logo.png").to_string_lossy().to_string();
+    let cover = synth(d, "cover.mp3", &[SINE, &["-i", &logo, "-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "mjpeg", "-disposition:v", "attached_pic", "-id3v2_version", "3"]].concat()).await;
+    let mkv = synth(d, "v.mkv", &["-f", "lavfi", "-i", "testsrc=size=640x360:rate=25:duration=3", "-f", "lavfi", "-i", "sine=frequency=220:duration=3", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"]).await;
+    let avi = synth(d, "v.avi", &["-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=2", "-c:v", "mpeg4"]).await;
+
+    for a in [&mp3, &wav, &flac, &aiff, &cover].into_iter().flatten() {
+        let m = media::probe(a).await.unwrap();
+        assert_eq!(m.kind(), MediaKind::Audio, "{}", a.display());
+        assert!(m.has_audio && !m.is_still, "{}", a.display());
+        assert!((2900..=3200).contains(&m.duration_ms), "{} duration {}", a.display(), m.duration_ms);
+    }
+    for v in [&mkv, &avi].into_iter().flatten() {
+        let m = media::probe(v).await.unwrap();
+        assert_eq!(m.kind(), MediaKind::Video, "{}", v.display());
+    }
+
+    // V1 from the mkv (falls back to the fixture) with every synthesised audio clip layered on tracks.
+    let v1 = mkv.clone().unwrap_or_else(|| fixture("clip_a_720p.mp4"));
+    let mut p = Project::new("formats");
+    timeline::append(&mut p, Clip::new(v1.clone(), media::probe(&v1).await.unwrap()));
+    if let Some(avi) = &avi {
+        timeline::append(&mut p, Clip::new(avi.clone(), media::probe(avi).await.unwrap()));
+    }
+    let t = timeline::audio_track_add(&mut p, "Music");
+    let mut at = 0;
+    for a in [&mp3, &wav, &flac, &aiff, &cover].into_iter().flatten() {
+        timeline::audio_clip_add(&mut p, t, AudioClip::new(a.clone(), media::probe(a).await.unwrap()), at).unwrap();
+        at += 500;
+    }
+    let out = d.join("mix.mp4");
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false };
+    let plan = run(&p, &s).await;
+    assert_eq!(plan.strategy, Strategy::HardwareEncode);
+    let m = media::probe(&out).await.unwrap();
+    assert_eq!(m.codec, "h264");
+    assert_eq!(m.audio_codec.as_deref(), Some("aac"));
+    assert_eq!(m.duration_ms / 100, p.duration_ms() / 100);
+
+    let out_a = d.join("mix.m4a");
+    let s = ExportSettings { destination: out_a.clone(), quality: Quality::Draft, audio_only: true };
+    run(&p, &s).await;
+    assert_eq!(media::probe(&out_a).await.unwrap().kind(), MediaKind::Audio);
+}

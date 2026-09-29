@@ -34,6 +34,14 @@ export const useProjectStore = defineStore("project", () => {
   /** Media pool item being dragged onto the timeline (pointer-driven, not HTML5 DnD). */
   const poolDrag = ref<{ item: PoolItem; x: number; y: number } | null>(null);
   const poolView = ref<PoolView>(readLocal("forgevideo.poolView", "grid"));
+  /** Short-lived banner text (rejected drops, duplicate imports); see Banner.vue. */
+  const notice = ref<string | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function notify(text: string | null, ms = 3000) {
+    if (noticeTimer) clearTimeout(noticeTimer);
+    notice.value = text;
+    if (text) noticeTimer = setTimeout(() => { notice.value = null; }, ms);
+  }
   const timelineHeight = ref(Number(readLocal("forgevideo.timelineHeight", "360")) || 360);
   watch(poolView, (v) => writeLocal("forgevideo.poolView", v));
   watch(timelineHeight, (v) => writeLocal("forgevideo.timelineHeight", String(v)));
@@ -143,7 +151,7 @@ export const useProjectStore = defineStore("project", () => {
 
   return {
     project, clips, overlays, audioTracks, pool, duration, selected, selectedClipId, selectedClip, selectedIndex, selectedOverlay, selectedAudio,
-    playhead, playing, dirty, error, thumbs, waveforms, busy, current, currentOverlays, overlayLayers, activeAudioClips, poolDrag, poolView, timelineHeight,
+    playhead, playing, dirty, error, thumbs, waveforms, busy, current, currentOverlays, overlayLayers, activeAudioClips, poolDrag, poolView, timelineHeight, notice, notify,
 
     async load() { const p = await api.projectGet(); apply(p, false); cacheAll(p); },
     async newProject() { apply(await api.projectNew("Untitled"), false); dirty.value = false; playhead.value = 0; },
@@ -164,7 +172,15 @@ export const useProjectStore = defineStore("project", () => {
         if (c && p.clips.length > before) selected.value = { kind: "clip", id: c.id };
       }
     },
-    async poolAdd(paths: string[]) { for (const path of paths) await edit("import", () => api.poolAdd(path)); },
+    /** Pool only. A file already in the pool (same path, or the same file via a symlink) is skipped with a banner. */
+    async poolAdd(paths: string[]) {
+      for (const path of paths) {
+        const dup = () => notify(`${path.split("/").pop()} is already in the media pool`);
+        if (pool.value.some((i) => i.path === path)) { dup(); continue; }
+        const before = pool.value.length;
+        if (await edit("import", () => api.poolAdd(path)) && pool.value.length === before) dup();
+      }
+    },
     async poolRemove(id: string) { await edit("pool", () => api.poolRemove(id)); },
     async insertClip(path: string, atIndex: number) { await edit("insert", () => api.clipInsert(path, atIndex)); },
 
@@ -208,6 +224,13 @@ export const useProjectStore = defineStore("project", () => {
     async setFades(id: string, fi: Ms, fo: Ms) { await edit("fades", () => api.clipSetFades(id, fi, fo)); },
     async setTransition(id: string, t: Transition) { await edit("transition", () => api.clipSetTransition(id, t)); },
     async setVolume(id: string, v: number, muted: boolean) { await edit("volume", () => api.clipSetVolume(id, v, muted)); },
+    async renameClip(id: string, name: string) { await edit("rename", () => api.clipRename(id, name)); },
+    /** Right-click → split audio from video. Selects the new audio clip. */
+    async detachAudio(id: string, trackId: string | null = null) {
+      const before = new Set(audioTracks.value.flatMap((t) => t.clips.map((c) => c.id)));
+      if (!(await edit("detach", () => api.clipDetachAudio(id, trackId)))) return;
+      for (const t of audioTracks.value) for (const c of t.clips) if (!before.has(c.id)) { selected.value = { kind: "audio", id: c.id, trackId: t.id }; return; }
+    },
     async setAspect(a: AspectPreset) { await edit("aspect", () => api.setAspect(a)); },
     async setCrop(c: Crop) { await edit("crop", () => api.setCrop(c)); },
     async setVideoMuted(muted: boolean) { await edit("mute", () => api.setVideoMuted(muted)); },

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { baseProject, fakeSplit, project, resolveWith, type MockApi } from "./test/fixtures";
+import { baseProject, fakeSplit, poolItem, project, resolveWith, type MockApi } from "./test/fixtures";
 
 vi.mock("./api/tauri", async () => {
   const f = await import("./test/fixtures");
@@ -12,7 +12,7 @@ const api = apiModule as unknown as MockApi;
 const dialog = { open: vi.fn(), save: vi.fn(), ask: vi.fn() };
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: (...a: unknown[]) => dialog.open(...(a as [])), save: (...a: unknown[]) => dialog.save(...(a as [])), ask: (...a: unknown[]) => dialog.ask(...(a as [])) }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-let dropHandler: ((e: { payload: { type: string; paths: string[] } }) => void) | undefined;
+let dropHandler: ((e: { payload: { type: string; paths: string[]; position?: { x: number; y: number } } }) => void) | undefined;
 const unlistenDrop = vi.fn();
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: (cb: typeof dropHandler) => { dropHandler = cb; return Promise.resolve(unlistenDrop); } }) }));
 const setTitle = vi.fn();
@@ -94,6 +94,40 @@ describe("App shell", () => {
     await flush();
     expect(api.poolAdd).toHaveBeenCalledTimes(4);
     expect(store.clips).toHaveLength(2);
+  });
+
+  it("a Finder drop of unsupported files says what was skipped, and still pools the media", async () => {
+    const { store } = await setup();
+    api.poolAdd.mockImplementation((path: string) => Promise.resolve(project(base.clips, { pool: [...store.pool, poolItem({ path })] })));
+    dropHandler!({ payload: { type: "drop", paths: ["/docs/notes.txt", "/docs/deck.key", "/docs/a.pdf", "/audio/x.ogg"] } });
+    await flush();
+    expect(store.notice).toBe("Skipped notes.txt, deck.key +1 more — not a supported media file");
+    expect(api.poolAdd.mock.calls).toEqual([["/audio/x.ogg"]]);
+    store.notify(null);
+    dropHandler!({ payload: { type: "drop", paths: ["/audio/y.opus", "/v/z.3gp"] } });
+    await flush();
+    expect(store.notice).toBeNull();
+    expect(api.poolAdd).toHaveBeenCalledTimes(3);
+  });
+
+  it("a Finder drop that lands on the timeline still goes to the pool, with a banner saying so", async () => {
+    const { w, store } = await setup();
+    const tracks = w.find("[data-testid=timeline-tracks]").element;
+    api.poolAdd.mockImplementation((path: string) => Promise.resolve(project(base.clips, { pool: [...store.pool, poolItem({ path })] })));
+    const efp = vi.spyOn(document, "elementFromPoint").mockImplementation((x) => (x < 500 ? tracks : document.body));
+    Object.defineProperty(window, "devicePixelRatio", { value: 2, configurable: true });
+    dropHandler!({ payload: { type: "drop", paths: ["/v/c.mp4"], position: { x: 400, y: 900 } } });
+    await flush();
+    expect(efp).toHaveBeenCalledWith(200, 450);
+    expect(api.poolAdd).toHaveBeenCalledWith("/v/c.mp4");
+    expect(store.notice).toBe("Added to the media pool — drag from the pool onto the timeline");
+    expect(w.find("[data-testid=banner]").text()).toContain("Added to the media pool");
+    store.notify(null);
+    dropHandler!({ payload: { type: "drop", paths: ["/v/d.mp4"], position: { x: 1600, y: 100 } } });
+    await flush();
+    expect(api.poolAdd).toHaveBeenCalledWith("/v/d.mp4");
+    expect(store.notice).toBeNull();
+    efp.mockRestore();
   });
 
   it("Import… button uses the file dialog for one or many files", async () => {

@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useProjectStore } from "../stores/project";
 import ClipBlock from "./ClipBlock.vue";
 import FreeBlock from "./FreeBlock.vue";
 import MediaPool from "./MediaPool.vue";
 import MuteToggle from "./MuteToggle.vue";
-import { clipDuration, clipEnd, mediaKind } from "../types/project";
+import { clipDuration, clipEnd, clipName, mediaKind } from "../types/project";
 import type { AudioClip, Clip, OverlayClip, PoolItem } from "../types/project";
-import { clamp, fmtMs } from "../utils/time";
+import { basename, clamp, fmtMs } from "../utils/time";
 
 const store = useProjectStore();
 const scroller = ref<HTMLDivElement | null>(null);
@@ -210,7 +210,13 @@ function poolAccepts(row: string, item: PoolItem) {
 }
 async function onPoolDrop(row: string, e: CustomEvent<{ item: PoolItem; clientX: number }>) {
   const { item, clientX } = e.detail;
-  if (!poolAccepts(row, item)) return;
+  if (!poolAccepts(row, item)) {
+    const k = mediaKind(item.media);
+    if (k === "Audio") store.notify("Audio goes on an audio track — drop it on a ♪ row");
+    else if (item.media.has_audio) store.notify("Video and images go on V1 or a video track");
+    else store.notify(`${basename(item.path)} has no audio — video and images go on V1 or a video track`);
+    return;
+  }
   const at = Math.round(Math.max(0, xToMs(clientX)));
   if (row === "video") {
     let to = 0;
@@ -236,6 +242,53 @@ watch(() => store.playhead, (t) => {
 
 const ro = new ResizeObserver(([e]) => { viewW.value = e.contentRect.width; });
 onMounted(() => { if (scroller.value) ro.observe(scroller.value); });
+
+// ---- right-click menu on any clip; `renaming` swaps the items for a name field ----
+type MenuClip = { kind: "clip"; clip: Clip } | { kind: "overlay"; clip: OverlayClip } | { kind: "audio"; clip: AudioClip };
+const menu = ref<(MenuClip & { x: number; y: number; renaming: boolean }) | null>(null);
+function openMenu(target: MenuClip, e: MouseEvent) { menu.value = { ...target, x: e.clientX, y: e.clientY, renaming: false }; }
+const canDetach = (c: Clip) => c.media.has_audio && !c.media.is_still;
+async function detachAudio() {
+  const m = menu.value; menu.value = null;
+  if (m?.kind === "clip" && canDetach(m.clip)) await store.detachAudio(m.clip.id);
+}
+async function commitName(e: Event) {
+  const m = menu.value; if (!m?.renaming) return; // Escape or an outside click already closed it
+  menu.value = null;
+  const name = (e.target as HTMLInputElement).value.trim();
+  // Typing the file name back (or clearing the field) drops the custom name.
+  const next = name === basename(m.clip.source) ? "" : name;
+  if (next !== (m.clip.name ?? "")) await store.renameClip(m.clip.id, next);
+}
+const vFocus = { mounted: (el: HTMLInputElement) => { el.focus(); el.select(); } };
+
+// ---- "+ Track": one button, every track type ----
+const TRACK_TYPES = [
+  { label: "Video", hint: "Silent row above V1, composited on top" },
+  { label: "Audio", hint: "General audio track" },
+  { label: "Music", hint: "Audio track for music beds" },
+  { label: "Narration", hint: "Audio track for voice-over" },
+  { label: "SFX", hint: "Audio track for sound effects" },
+] as const;
+const addMenu = ref<{ x: number; y: number } | null>(null);
+function toggleAddMenu(e: MouseEvent) {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  addMenu.value = addMenu.value ? null : { x: r.left, y: r.bottom + 2 };
+}
+async function addTrack(label: (typeof TRACK_TYPES)[number]["label"]) {
+  addMenu.value = null;
+  if (label === "Video") await store.overlayLayerAdd();
+  else await store.audioTrackAdd(label);
+}
+
+function onWindowDown(e: Event) {
+  const t = e.target as HTMLElement;
+  if (menu.value && !t.closest("[data-testid=clip-menu]")) menu.value = null;
+  if (addMenu.value && !t.closest("[data-testid=add-track-menu], [data-testid=add-track]")) addMenu.value = null;
+}
+function onWindowKey(e: KeyboardEvent) { if (e.key === "Escape") { menu.value = null; addMenu.value = null; } }
+onMounted(() => { window.addEventListener("pointerdown", onWindowDown); window.addEventListener("keydown", onWindowKey); });
+onBeforeUnmount(() => { window.removeEventListener("pointerdown", onWindowDown); window.removeEventListener("keydown", onWindowKey); });
 
 // ---- audio track gutter ----
 const editingLabel = ref<string | null>(null);
@@ -263,17 +316,17 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
       <button class="hover:text-fg" @click="zoom = 1">Fit</button>
     </div>
 
-    <div class="flex shrink-0 border-b border-line" :style="{ height: tracksHeight + 'px' }">
+    <div class="flex shrink-0 border-b border-line" data-testid="timeline-tracks" :style="{ height: tracksHeight + 'px' }">
       <!-- label gutter, mirrors the row heights -->
       <div class="w-24 shrink-0 border-r border-line text-[10px] text-muted select-none">
         <div class="flex items-end justify-end px-1" :style="{ height: ROW.ruler + ROW.gap + 'px' }">
-          <button class="hover:text-fg" title="Add an overlay layer for composite shots" @click="store.overlayLayerAdd()">+ Layer</button>
+          <button data-testid="add-track" class="hover:text-fg" title="Add a video or audio track" aria-haspopup="menu" :aria-expanded="!!addMenu" @click="toggleAddMenu">+ Track</button>
         </div>
         <div
           v-for="{ layer } in [...displayLayers].reverse()" :key="layer" class="px-2 flex items-center gap-1" :style="{ height: ROW.overlay + 'px', marginBottom: ROW.gap + 'px' }"
         >
-          <span class="flex-1 truncate">V{{ layer + 2 }} · overlay</span>
-          <button v-if="store.overlayLayers > 1" class="w-4 text-center hover:text-danger" :title="`Remove layer V${layer + 2}`" @click="store.overlayLayerRemove(layer)">✕</button>
+          <span class="flex-1 truncate">V{{ layer + 2 }} · video</span>
+          <button v-if="store.overlayLayers > 1" class="w-4 text-center hover:text-danger" :title="`Remove track V${layer + 2}`" @click="store.overlayLayerRemove(layer)">✕</button>
         </div>
         <div class="px-2 flex items-center gap-1" :style="{ height: ROW.video + 'px', marginBottom: ROW.gap + 'px' }">
           <span class="flex-1 truncate">V1 · video</span>
@@ -288,7 +341,6 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
           <MuteToggle :muted="track.muted" label="track" :size="14" @toggle="store.audioTrackUpdate(track.id, track.label, !track.muted)" />
           <button class="w-4 text-center hover:text-danger" title="Remove track" @click="store.audioTrackRemove(track.id)">✕</button>
         </div>
-        <button class="px-2 h-5 hover:text-fg" @click="store.audioTrackAdd('Audio')">+ Track</button>
         <datalist id="track-presets"><option value="Music" /><option value="SFX" /><option value="Narration" /><option value="Other" /></datalist>
       </div>
 
@@ -315,9 +367,9 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
                 :thumbs="store.thumbs[o.source]" :dimmed="o.timeline_start >= store.duration"
                 @select="store.select({ kind: 'overlay', id: o.id })"
                 @trim-start="startFreeTrim({ kind: 'overlay', clip: o }, $event, 'freeTrimStart')" @trim-end="startFreeTrim({ kind: 'overlay', clip: o }, $event, 'freeTrimEnd')"
-                @drag-start="startFreeMove({ kind: 'overlay', clip: o }, $event)"
+                @drag-start="startFreeMove({ kind: 'overlay', clip: o }, $event)" @context-menu="openMenu({ kind: 'overlay', clip: o }, $event)"
               />
-              <div v-if="!clips.length" class="text-[11px] text-muted/60 pt-3 pl-1 pointer-events-none">Drop a PNG or video here for logos, lower-thirds and B-roll</div>
+              <div v-if="!clips.length" class="text-[11px] text-muted/60 pt-3 pl-1 pointer-events-none">Drop video or a PNG here · composites over V1 (logos, lower-thirds, B-roll)</div>
             </div>
           </div>
 
@@ -332,6 +384,7 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
                 v-for="(c, i) in displayClips" :key="c.id" :clip="c" :index="i" :px-per-ms="pxPerMs"
                 :selected="c.id === store.selectedClipId" :thumbs="store.thumbs[c.source]" :peaks="store.project?.video_muted ? undefined : store.waveforms[c.source]"
                 @select="store.select(c.id)" @trim-start="startTrim(c, $event, 'trimStart')" @trim-end="startTrim(c, $event, 'trimEnd')" @drag-start="startMove(c, $event)"
+                @context-menu="openMenu({ kind: 'clip', clip: c }, $event)"
               />
             </div>
           </div>
@@ -349,7 +402,7 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
                 :peaks="store.waveforms[c.source]" :dimmed="c.timeline_start >= store.duration"
                 @select="store.select({ kind: 'audio', id: c.id, trackId: track.id })"
                 @trim-start="startFreeTrim({ kind: 'audio', clip: c, trackId: track.id }, $event, 'freeTrimStart')" @trim-end="startFreeTrim({ kind: 'audio', clip: c, trackId: track.id }, $event, 'freeTrimEnd')"
-                @drag-start="startFreeMove({ kind: 'audio', clip: c, trackId: track.id }, $event)"
+                @drag-start="startFreeMove({ kind: 'audio', clip: c, trackId: track.id }, $event)" @context-menu="openMenu({ kind: 'audio', clip: c }, $event)"
               />
             </div>
           </div>
@@ -366,5 +419,40 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
     </div>
 
     <MediaPool class="flex-1 min-h-0" />
+
+    <!-- right-click menu -->
+    <div
+      v-if="menu" data-testid="clip-menu" role="menu" class="fixed z-50 min-w-44 py-1 rounded-md bg-panel-2 border border-line shadow-xl text-xs"
+      :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
+    >
+      <input
+        v-if="menu.renaming" v-focus data-testid="clip-name" aria-label="Clip name" maxlength="80" :value="clipName(menu.clip)"
+        class="mx-2 my-1 w-52 bg-panel border border-line rounded px-1.5 py-1 text-fg"
+        @keydown.enter="commitName" @keydown.escape.stop="menu = null" @blur="commitName"
+      />
+      <template v-else>
+        <button
+          v-if="menu.kind === 'clip'"
+          role="menuitem" class="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-black disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg"
+          :disabled="!canDetach(menu.clip)" :title="canDetach(menu.clip) ? 'Move this clip\'s sound to an audio track and mute the video' : 'This clip has no audio'"
+          @click="detachAudio"
+        >Split audio from video</button>
+        <button
+          role="menuitem" data-testid="clip-rename" class="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-black"
+          title="Name this clip on the timeline (leave blank for the file name)" @click="menu.renaming = true"
+        >Rename…</button>
+      </template>
+    </div>
+
+    <!-- "+ Track" menu -->
+    <div
+      v-if="addMenu" data-testid="add-track-menu" role="menu" class="fixed z-50 min-w-36 py-1 rounded-md bg-panel-2 border border-line shadow-xl text-xs"
+      :style="{ left: addMenu.x + 'px', top: addMenu.y + 'px' }"
+    >
+      <button
+        v-for="t in TRACK_TYPES" :key="t.label" role="menuitem" class="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-black"
+        :title="t.hint" @click="addTrack(t.label)"
+      >{{ t.label === 'Video' ? '▶' : '♪' }} {{ t.label }} track</button>
+    </div>
   </div>
 </template>

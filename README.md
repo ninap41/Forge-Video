@@ -9,11 +9,14 @@ Stack: Vue 3 + TypeScript + Pinia + Tailwind → Tauri 2 → Rust → `ffmpeg`/`
 
 ## Features
 
-**Media pool** — the section under the timeline. Every imported file lives here, in Clips / Audio /
-Images tabs, as thumbnails or a list (your choice is remembered). Add files with **Import…**, **⌘I**,
-the per-tab Import button, or by dropping them anywhere in the window. Drag an item onto a track to
-place it at that time, or double-click to place it at the playhead. Accepted: mp4, mov, m4v, mkv,
-webm, avi, mts, m2ts · mp3, m4a, aac, wav, aiff, flac · png, jpg, jpeg, webp.
+**Media pool** — the section under the timeline. Every imported file lives here, in All / Clips /
+Audio / Images tabs, as thumbnails or a list (your choice is remembered). Add files with **Import…**,
+**⌘I**, the per-tab Import button, or by dropping them anywhere in the window; the same file is never
+pooled twice. Drag an item onto a track to place it at that time, or double-click to place it at the
+playhead. A small banner explains any drop that cannot land. Accepted: mp4, mov, m4v, mkv, webm, avi,
+mts, m2ts, 3gp, ts, mpg, mpeg, wmv, flv, mxf · mp3, m4a, aac, wav, aiff, aif, flac, ogg, oga, opus, caf,
+m4b, wma · png, jpg, jpeg, webp, bmp, tif, tiff. Anything ffmpeg decodes exports fine; the preview can
+only play what macOS WebKit plays (mp4/mov/m4v and common audio) and says so for the rest.
 
 **V1 · video** — the main track. Always contiguous: trimming or deleting ripples everything after.
 Video *or still images* (a still defaults to 5 s and stretches as far as you drag it). Per clip:
@@ -24,7 +27,7 @@ Dip to black into the next clip. The speaker icon in the gutter mutes the whole 
 picture-in-picture. Clips are free-positioned and silent; each layer keeps its clips from overlapping
 (a clip you drop pushes what it lands on). Select an overlay and drag it in the preview to place it,
 scroll to resize; PNGs start as a small bottom-right badge, video starts full-frame. Fade in/out per
-clip. **+ Layer** in the gutter adds a row; ✕ removes one.
+clip. **+ Track → Video track** in the gutter adds a row; ✕ removes one.
 
 **Audio tracks** — as many as you like, each with a label (Music, SFX, Narration, Other, or your own
 text; click it to rename) and a track mute. Clips are free-positioned, can be dragged between tracks,
@@ -220,6 +223,8 @@ The table is generated from `SHORTCUTS` in `src/components/HelpDialog.vue`; keep
 |---|---|
 | Drag clip edge | Trim in / out point (frame-snapped) |
 | Drag V1 clip | Reorder clips |
+| Right-click V1 clip | **Split audio from video**: sound moves to an audio track, the clip is muted |
+| Right-click any clip | **Rename…**: name the clip on the timeline (blank restores the file name) |
 | Drag overlay / audio clip | Move it in time, or to another layer / track |
 | Drag from media pool | Place on a track at that time |
 | Double-click pool item | Place it at the playhead |

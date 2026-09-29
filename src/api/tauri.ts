@@ -30,6 +30,10 @@ export const api = {
   clipSetFades: (id: string, fadeIn: Ms, fadeOut: Ms) => invoke<Project>("clip_set_fades", { id, fadeIn: ms(fadeIn), fadeOut: ms(fadeOut) }),
   clipSetTransition: (id: string, transition: Transition) => invoke<Project>("clip_set_transition", { id, transition }),
   clipSetVolume: (id: string, volume: number, muted: boolean) => invoke<Project>("clip_set_volume", { id, volume, muted }),
+  /** Rename a clip on any track (V1, overlay, audio). Blank restores the file name. */
+  clipRename: (id: string, name: string) => invoke<Project>("clip_rename", { id, name }),
+  /** Split audio from video: the clip's sound becomes an audio-track clip and the video clip is muted. */
+  clipDetachAudio: (id: string, trackId: string | null = null) => invoke<Project>("clip_detach_audio", { id, trackId }),
 
   poolAdd: (path: string) => invoke<Project>("pool_add", { path }),
   poolRemove: (id: string) => invoke<Project>("pool_remove", { id }),

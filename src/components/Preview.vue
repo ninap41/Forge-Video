@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useProjectStore } from "../stores/project";
 import { api } from "../api/tauri";
 import { ASPECT_PRESETS, clipDuration, transitionMs, type OverlayClip, type Placement } from "../types/project";
-import { clamp } from "../utils/time";
+import { basename, clamp } from "../utils/time";
 
 const store = useProjectStore();
 const video = ref<HTMLVideoElement | null>(null);
@@ -263,9 +263,19 @@ watch(() => [store.playhead, cur.value?.clip.id] as const, async ([, id]) => {
 function nextSrcReady() {
   return new Promise<void>((res) => {
     const v = video.value; if (!v) return res();
-    if (v.readyState >= 1) return res();
-    v.addEventListener("loadedmetadata", () => res(), { once: true });
+    if (v.readyState >= 1 || v.error) return res();
+    const done = () => { v.removeEventListener("loadedmetadata", done); v.removeEventListener("error", done); res(); };
+    v.addEventListener("loadedmetadata", done, { once: true });
+    v.addEventListener("error", done, { once: true });
   });
+}
+// WKWebView cannot play everything ffmpeg can (mkv, avi, mts, some webm/ogg). Say so once per file
+// instead of freezing; export is unaffected.
+const unplayable = new Set<string>();
+function onMediaError(source: string) {
+  if (unplayable.has(source)) return;
+  unplayable.add(source);
+  store.notify(`Preview can't play ${basename(source)} here — export still works`, 5000);
 }
 // New audio elements (playhead entered a clip) and volume/mute edits need a nudge.
 watch(() => store.activeAudioClips.map((a) => `${a.clip.id}:${a.clip.volume}:${a.silent}`).join(","), () => { void Promise.resolve().then(syncAudio); });
@@ -289,7 +299,7 @@ onBeforeUnmount(() => { ro.disconnect(); cancelAnimationFrame(raf); });
       @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp" @wheel="onWheel"
     >
       <img v-if="curStill" :src="src" class="absolute max-w-none pointer-events-none" :style="videoStyle" draggable="false" data-testid="still-layer" />
-      <video v-else ref="video" :src="src" class="absolute max-w-none pointer-events-none" :style="videoStyle" playsinline preload="auto" @loadedmetadata="syncSeek" />
+      <video v-else ref="video" :src="src" class="absolute max-w-none pointer-events-none" :style="videoStyle" playsinline preload="auto" @loadedmetadata="syncSeek" @error="store.current && onMediaError(store.current.clip.source)" />
       <template v-for="o in ovs" :key="o.clip.id">
         <img
           v-if="o.clip.media.is_still" :src="api.assetUrl(o.clip.source)" class="absolute max-w-none pointer-events-none object-fill"
@@ -297,7 +307,7 @@ onBeforeUnmount(() => { ro.disconnect(); cancelAnimationFrame(raf); });
         />
         <video
           v-else :ref="(el) => setOverlayEl(o.clip.id, el)" :src="api.assetUrl(o.clip.source)" class="absolute max-w-none pointer-events-none object-fill"
-          :class="ov?.clip.id === o.clip.id ? 'outline outline-1 outline-accent' : ''" :style="overlayStyle(o)" playsinline preload="auto" muted data-testid="overlay-layer" @loadedmetadata="syncOverlay"
+          :class="ov?.clip.id === o.clip.id ? 'outline outline-1 outline-accent' : ''" :style="overlayStyle(o)" playsinline preload="auto" muted data-testid="overlay-layer" @loadedmetadata="syncOverlay" @error="onMediaError(o.clip.source)"
         />
       </template>
       <div class="absolute bottom-1 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 rounded">
@@ -306,6 +316,7 @@ onBeforeUnmount(() => { ro.disconnect(); cancelAnimationFrame(raf); });
     </div>
     <audio
       v-for="a in store.activeAudioClips" :key="a.clip.id" :ref="(el) => setAudioEl(a.clip.id, el)" :src="api.assetUrl(a.clip.source)" preload="auto" data-testid="audio-clip"
+      @error="onMediaError(a.clip.source)"
     />
   </div>
 </template>

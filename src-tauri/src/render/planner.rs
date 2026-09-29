@@ -104,16 +104,17 @@ pub fn plan(p: &Project, s: &ExportSettings) -> crate::error::Result<ExportPlan>
     let reasons = stream_copy_blockers(p);
     if reasons.is_empty() {
         let c = &p.clips[0];
-        let args = vec![
+        // Only the first audio stream was checked, so only it is copied. HEVC needs the hvc1 tag for QuickTime.
+        let mut args: Vec<String> = vec![
             "-y".into(),
             "-ss".into(), ms_to_secs(c.source_start),
             "-to".into(), ms_to_secs(c.source_end),
             "-i".into(), c.source.to_string_lossy().into(),
             "-c".into(), "copy".into(),
-            "-map".into(), "0:v:0".into(), "-map".into(), "0:a?".into(),
-            "-movflags".into(), "+faststart".into(),
-            s.destination.to_string_lossy().into(),
+            "-map".into(), "0:v:0".into(), "-map".into(), "0:a:0?".into(),
         ];
+        if c.media.codec == "hevc" { args.extend(["-tag:v".to_string(), "hvc1".to_string()]); }
+        args.extend(["-movflags".to_string(), "+faststart".to_string(), s.destination.to_string_lossy().into()]);
         return Ok(ExportPlan {
             strategy: Strategy::StreamCopy,
             duration_ms,
@@ -349,8 +350,18 @@ mod more_tests {
         assert_eq!(&a[1..5], &["-ss", "0.250", "-to", "4.750"]);
         assert_eq!(a[a.len() - 1], "/tmp/out.mp4");
         assert!(a.windows(2).any(|w| w[0] == "-movflags" && w[1] == "+faststart"));
-        assert!(a.windows(2).any(|w| w[0] == "-map" && w[1] == "0:a?"), "audio is optional");
+        assert!(a.windows(2).any(|w| w[0] == "-map" && w[1] == "0:a:0?"), "only the checked first audio stream, optional");
+        assert!(!a.iter().any(|x| x == "-tag:v"), "h264 needs no tag");
         assert!(!a.iter().any(|x| x.contains("videotoolbox")));
+    }
+
+    #[test]
+    fn hevc_stream_copy_tags_hvc1_for_quicktime() {
+        let mut m = media(1920, 1080);
+        m.codec = "hevc".into();
+        let plan = plan(&one(m), &settings()).unwrap();
+        assert_eq!(plan.strategy, Strategy::StreamCopy);
+        assert!(plan.args.windows(2).any(|w| w[0] == "-tag:v" && w[1] == "hvc1"));
     }
 
     #[test]

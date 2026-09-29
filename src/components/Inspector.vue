@@ -2,8 +2,8 @@
 import { computed, ref, watch } from "vue";
 import { useProjectStore } from "../stores/project";
 import MuteToggle from "./MuteToggle.vue";
-import { ASPECT_PRESETS, PLACEMENT_BADGE, PLACEMENT_FULL, clipDuration, type Transition } from "../types/project";
-import { basename, fmtMs } from "../utils/time";
+import { ASPECT_PRESETS, PLACEMENT_BADGE, PLACEMENT_FULL, clipDuration, clipName, type Transition } from "../types/project";
+import { fmtMs } from "../utils/time";
 
 const store = useProjectStore();
 const clip = computed(() => store.selectedClip);
@@ -81,7 +81,7 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
       <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Clip</h3>
       <div v-if="!clip" class="text-muted">Select a clip on the timeline.</div>
       <template v-else>
-        <div class="font-medium truncate" :title="clip.source">{{ basename(clip.source) }}</div>
+        <div class="font-medium truncate" :title="clip.source">{{ clipName(clip) }}</div>
         <div class="text-muted mb-2">
           {{ clip.media.width }}×{{ clip.media.height }} · {{ (clip.media.fps.num / clip.media.fps.den).toFixed(2) }} fps · {{ clip.media.codec }}
           <br />In {{ fmtMs(clip.source_start) }} · Out {{ fmtMs(clip.source_end) }} · {{ fmtMs(clipDuration(clip)) }}
@@ -133,7 +133,7 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
     <!-- Overlay clip (V2) -->
     <section v-if="ov" class="p-3 border-b border-line">
       <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Overlay</h3>
-      <div class="font-medium truncate" :title="ov.source">{{ basename(ov.source) }}</div>
+      <div class="font-medium truncate" :title="ov.source">{{ clipName(ov) }}</div>
       <div class="text-muted mb-2">
         {{ ov.media.is_still ? 'Still image' : 'Video (silent)' }} · {{ ov.media.width }}×{{ ov.media.height }}
         <br />At {{ fmtMs(ov.timeline_start) }} · {{ fmtMs(clipDuration(ov)) }}
@@ -169,7 +169,7 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
     <!-- Audio clip -->
     <section v-if="au" class="p-3 border-b border-line">
       <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Audio · {{ au.track.label }}</h3>
-      <div class="font-medium truncate" :title="au.clip.source">{{ basename(au.clip.source) }}</div>
+      <div class="font-medium truncate" :title="au.clip.source">{{ clipName(au.clip) }}</div>
       <div class="text-muted mb-2">At {{ fmtMs(au.clip.timeline_start) }} · In {{ fmtMs(au.clip.source_start) }} · Out {{ fmtMs(au.clip.source_end) }} · {{ fmtMs(clipDuration(au.clip)) }}</div>
       <label class="flex items-center gap-2 mt-2">
         <span class="w-14 text-muted">Volume</span>

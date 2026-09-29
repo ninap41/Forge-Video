@@ -2,17 +2,16 @@
 // A free-positioned clip on the overlay (V2) or an audio track. Thin sibling of ClipBlock.
 import { computed, onMounted, ref, watch } from "vue";
 import type { AudioClip, OverlayClip } from "../types/project";
-import { clipDuration } from "../types/project";
+import { clipDuration, clipName } from "../types/project";
 import type { Thumbs } from "../stores/project";
 import { api } from "../api/tauri";
-import { basename } from "../utils/time";
 import { drawPeaks } from "../utils/waveform";
 
 const props = defineProps<{
   clip: OverlayClip | AudioClip; kind: "overlay" | "audio"; pxPerMs: number; selected: boolean;
   thumbs?: Thumbs; peaks?: number[]; dimmed?: boolean;
 }>();
-const emit = defineEmits<{ select: []; trimStart: [e: PointerEvent]; trimEnd: [e: PointerEvent]; dragStart: [e: PointerEvent] }>();
+const emit = defineEmits<{ select: []; trimStart: [e: PointerEvent]; trimEnd: [e: PointerEvent]; dragStart: [e: PointerEvent]; contextMenu: [e: MouseEvent] }>();
 
 const width = computed(() => clipDuration(props.clip) * props.pxPerMs);
 const still = computed(() => props.clip.media.is_still);
@@ -47,7 +46,7 @@ watch(() => [width.value, props.peaks, props.clip.source_start, props.clip.sourc
       kind === 'audio' ? 'bg-accent-2/15' : 'bg-panel-2']"
     :style="{ left: clip.timeline_start * pxPerMs + 'px', width: width + 'px' }"
     :data-clip-id="clip.id"
-    @pointerdown.stop="emit('select'); emit('dragStart', $event)"
+    @pointerdown.stop="emit('select'); emit('dragStart', $event)" @contextmenu.prevent.stop="emit('select'); emit('contextMenu', $event)"
   >
     <template v-if="kind === 'overlay'">
       <div v-if="still" class="absolute inset-0 bg-black/40" :style="{ backgroundImage: `url(${stillUrl})`, backgroundSize: 'auto 100%', backgroundRepeat: 'repeat-x', backgroundPosition: 'left center' }" />
@@ -57,7 +56,7 @@ watch(() => [width.value, props.peaks, props.clip.source_start, props.clip.sourc
     </template>
     <canvas v-else ref="canvas" class="absolute inset-0 h-full" />
     <div class="absolute left-1.5 top-0.5 text-[10px] font-medium text-white drop-shadow px-1 rounded bg-black/40 truncate max-w-[calc(100%-12px)]">
-      {{ kind === 'audio' ? '♪ ' : still ? '▣ ' : '' }}{{ basename(clip.source) }}
+      {{ kind === 'audio' ? '♪ ' : still ? '▣ ' : '' }}{{ clipName(clip) }}
     </div>
     <div v-if="clip.fade_in" class="absolute left-0 top-0 h-full bg-gradient-to-r from-black/80 to-transparent pointer-events-none" :style="{ width: clip.fade_in * pxPerMs + 'px' }" />
     <div v-if="clip.fade_out" class="absolute right-0 top-0 h-full bg-gradient-to-l from-black/80 to-transparent pointer-events-none" :style="{ width: clip.fade_out * pxPerMs + 'px' }" />

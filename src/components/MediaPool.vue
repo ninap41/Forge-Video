@@ -6,17 +6,20 @@ import { useProjectStore } from "../stores/project";
 import { api } from "../api/tauri";
 import { mediaKind, type MediaKind, type PoolItem } from "../types/project";
 import { basename, fmtMs } from "../utils/time";
+import { AUDIO_EXT, IMAGE_EXT, MEDIA_EXT, VIDEO_EXT } from "../utils/media";
 
-export type PoolTab = MediaKind;
+export type PoolTab = "All" | MediaKind;
 const store = useProjectStore();
-const tab = ref<PoolTab>("Video");
+const tab = ref<PoolTab>("All");
 const TABS: { id: PoolTab; label: string; ext: string[] }[] = [
-  { id: "Video", label: "Clips", ext: ["mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts"] },
-  { id: "Audio", label: "Audio", ext: ["mp3", "m4a", "aac", "wav", "aiff", "flac", "mp4", "mov"] },
-  { id: "Image", label: "Images", ext: ["png", "jpg", "jpeg", "webp"] },
+  { id: "All", label: "All", ext: MEDIA_EXT },
+  { id: "Video", label: "Clips", ext: VIDEO_EXT },
+  { id: "Audio", label: "Audio", ext: [...AUDIO_EXT, ...VIDEO_EXT] }, // the audio of a video is fair game
+  { id: "Image", label: "Images", ext: IMAGE_EXT },
 ];
-const items = computed(() => store.pool.filter((i) => mediaKind(i.media) === tab.value));
-const count = (k: PoolTab) => store.pool.filter((i) => mediaKind(i.media) === k).length;
+const inTab = (i: PoolItem, t: PoolTab) => t === "All" || mediaKind(i.media) === t;
+const items = computed(() => store.pool.filter((i) => inTab(i, tab.value)));
+const count = (t: PoolTab) => store.pool.filter((i) => inTab(i, t)).length;
 
 async function importFiles() {
   const t = TABS.find((t) => t.id === tab.value)!;
@@ -58,8 +61,13 @@ function onPointerUp(e: PointerEvent) {
   const d = store.poolDrag; pending = null;
   if (!d) return;
   store.poolDrag = null;
-  const row = document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-row]");
-  row?.dispatchEvent(new CustomEvent("pooldrop", { detail: { item: d.item, clientX: e.clientX }, bubbles: false }));
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const row = under?.closest("[data-row]");
+  if (row) { row.dispatchEvent(new CustomEvent("pooldrop", { detail: { item: d.item, clientX: e.clientX }, bubbles: false })); return; }
+  // Released inside the timeline but on no row: the only way that happens with audio is having no audio track yet.
+  if (under?.closest("[data-testid=timeline-tracks]") && mediaKind(d.item.media) === "Audio" && !store.audioTracks.length) {
+    store.notify("No audio track yet — click “+ Track”, then drop the audio there");
+  }
 }
 onBeforeUnmount(() => window.removeEventListener("pointermove", onPointerMove));
 </script>

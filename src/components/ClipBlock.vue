@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import type { Clip } from "../types/project";
-import { clipDuration, transitionMs } from "../types/project";
+import { clipDuration, clipName, transitionMs } from "../types/project";
 import type { Thumbs } from "../stores/project";
-import { basename } from "../utils/time";
 import { api } from "../api/tauri";
 import { drawPeaks } from "../utils/waveform";
 
 const props = defineProps<{ clip: Clip; pxPerMs: number; selected: boolean; thumbs?: Thumbs; peaks?: number[]; index: number }>();
-const emit = defineEmits<{ select: []; trimStart: [e: PointerEvent]; trimEnd: [e: PointerEvent]; dragStart: [e: PointerEvent] }>();
+const emit = defineEmits<{ select: []; trimStart: [e: PointerEvent]; trimEnd: [e: PointerEvent]; dragStart: [e: PointerEvent]; contextMenu: [e: MouseEvent] }>();
 
 const width = computed(() => clipDuration(props.clip) * props.pxPerMs);
 const trans = computed(() => transitionMs(props.clip.transition_out) * props.pxPerMs);
@@ -41,14 +40,14 @@ watch(() => [width.value, props.peaks, props.clip.source_start, props.clip.sourc
     class="absolute top-0 h-full rounded-md overflow-hidden border select-none group"
     :class="selected ? 'border-accent ring-2 ring-accent/40 z-10' : 'border-line hover:border-muted'"
     :style="{ left: clip.timeline_start * pxPerMs + 'px', width: width + 'px', background: '#2a2a30' }"
-    @pointerdown.stop="emit('select'); emit('dragStart', $event)"
+    @pointerdown.stop="emit('select'); emit('dragStart', $event)" @contextmenu.prevent.stop="emit('select'); emit('contextMenu', $event)"
   >
     <div class="absolute inset-x-0 top-0 h-[54px] overflow-hidden bg-black/40" :style="still ? { backgroundImage: `url(${stillUrl})`, backgroundSize: 'auto 100%', backgroundRepeat: 'repeat-x', backgroundPosition: 'left center' } : {}">
       <img v-for="t in visibleThumbs" :key="t.left" :src="t.url" class="absolute top-0 h-full object-cover pointer-events-none" :style="{ left: t.left + 'px', width: t.w + 'px' }" draggable="false" />
     </div>
     <canvas ref="canvas" class="absolute inset-x-0 bottom-0 h-[22px] bg-black/30" />
     <div class="absolute left-1.5 top-1 text-[11px] font-medium text-white drop-shadow px-1 rounded bg-black/40 truncate max-w-[calc(100%-12px)]">
-      {{ index + 1 }} · {{ still ? '▣ ' : '' }}{{ basename(clip.source) }}
+      {{ index + 1 }} · {{ still ? '▣ ' : '' }}{{ clipName(clip) }}
     </div>
     <div v-if="clip.fade_in" class="absolute left-0 top-0 h-[54px] bg-gradient-to-r from-black/80 to-transparent pointer-events-none" :style="{ width: clip.fade_in * pxPerMs + 'px' }" />
     <div v-if="clip.fade_out" class="absolute right-0 top-0 h-[54px] bg-gradient-to-l from-black/80 to-transparent pointer-events-none" :style="{ width: clip.fade_out * pxPerMs + 'px' }" />
