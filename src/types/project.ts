@@ -44,6 +44,8 @@ export type Transition =
 export interface Clip {
   id: string;
   source: string;
+  /** User-given name; absent or null = show the file name. */
+  name?: string | null;
   media: MediaInfo;
   source_start: Ms;
   source_end: Ms;
@@ -64,6 +66,8 @@ export const PLACEMENT_BADGE: Placement = { scale: 0.35, x: 0.85, y: 0.85 };
 export interface OverlayClip {
   id: string;
   source: string;
+  /** User-given name; absent or null = show the file name. */
+  name?: string | null;
   media: MediaInfo;
   source_start: Ms;
   source_end: Ms;
@@ -78,6 +82,8 @@ export interface OverlayClip {
 export interface AudioClip {
   id: string;
   source: string;
+  /** User-given name; absent or null = show the file name. */
+  name?: string | null;
   media: MediaInfo;
   source_start: Ms;
   source_end: Ms;
@@ -140,4 +146,6 @@ export const projectDuration = (p: Project): Ms => {
   const last = p.clips[p.clips.length - 1];
   return last ? last.timeline_start + clipDuration(last) : 0;
 };
+/** What a clip is called on the timeline: its own name, else the file name. */
+export const clipName = (c: { name?: string | null; source: string }): string => c.name || (c.source.split("/").pop() ?? c.source);
 export const transitionMs = (t: Transition): Ms => (t.type === "None" ? 0 : t.ms);

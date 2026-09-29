@@ -45,6 +45,15 @@ describe("ClipBlock", () => {
     expect(w.emitted("dragStart")).toHaveLength(1);
   });
 
+  it("right-click selects and emits contextMenu without the browser menu", async () => {
+    const w = mount(ClipBlock, { props: { clip: clip({ id: "a" }), index: 0, pxPerMs: 0.1, selected: false } });
+    const e = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 50 });
+    w.element.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(true);
+    expect(w.emitted("select")).toHaveLength(1);
+    expect(w.emitted("contextMenu")?.[0][0]).toBe(e);
+  });
+
   it("draws fade ramps and a transition badge sized in pixels", () => {
     const { w } = mountBlock({ fade_in: 500, fade_out: 250, transition_out: { type: "CrossDissolve", ms: 1000 } });
     const grads = w.findAll("[class*='bg-gradient']");

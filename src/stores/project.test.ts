@@ -22,6 +22,64 @@ beforeEach(() => {
   api.cacheWaveform.mockImplementation(() => Promise.resolve({ bucket_ms: 10, peaks: [1, 2, 3] }));
 });
 
+describe("notify", () => {
+  it("shows a notice, replaces an earlier one, and auto-clears", () => {
+    vi.useFakeTimers();
+    const s = useProjectStore();
+    expect(s.notice).toBeNull();
+    s.notify("first");
+    s.notify("second", 1000);
+    expect(s.notice).toBe("second");
+    vi.advanceTimersByTime(999);
+    expect(s.notice).toBe("second");
+    vi.advanceTimersByTime(1);
+    expect(s.notice).toBeNull();
+    s.notify("x"); s.notify(null);
+    expect(s.notice).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("poolAdd skips files already in the pool and notifies, including duplicates Rust folds away", async () => {
+    const s = useProjectStore();
+    const pooled = project([], { pool: [poolItem({ id: "p", path: "/music/bed.m4a" })] });
+    s.project = pooled;
+    api.poolAdd.mockResolvedValue(pooled);
+    await s.poolAdd(["/music/bed.m4a"]);
+    expect(api.poolAdd).not.toHaveBeenCalled();
+    expect(s.notice).toBe("bed.m4a is already in the media pool");
+    s.notify(null);
+    // A symlink to the same file: the store cannot tell, Rust returns the pool unchanged.
+    await s.poolAdd(["/links/bed.m4a"]);
+    expect(api.poolAdd).toHaveBeenCalledWith("/links/bed.m4a");
+    expect(s.notice).toBe("bed.m4a is already in the media pool");
+    s.notify(null);
+    const grown = project([], { pool: [...pooled.pool, poolItem({ id: "q", path: "/music/new.m4a" })] });
+    api.poolAdd.mockResolvedValue(grown);
+    await s.poolAdd(["/music/new.m4a"]);
+    expect(s.pool).toHaveLength(2);
+    expect(s.notice).toBeNull();
+  });
+});
+
+describe("detachAudio", () => {
+  it("calls the command and selects the new audio clip", async () => {
+    const s = useProjectStore();
+    s.project = baseProject();
+    const after = project(baseProject().clips.map((c, i) => (i === 0 ? { ...c, muted: true } : c)), {
+      audio_tracks: [audioTrack([audioClip({ id: "detached", source: "/v/a.mp4" })], { id: "t9" })],
+    });
+    api.clipDetachAudio.mockResolvedValue(after);
+    await s.detachAudio("a");
+    expect(api.clipDetachAudio).toHaveBeenCalledWith("a", null);
+    expect(s.clips[0].muted).toBe(true);
+    expect(s.selected).toEqual({ kind: "audio", id: "detached", trackId: "t9" });
+    api.clipDetachAudio.mockRejectedValue(new Error("clip has no audio"));
+    await s.detachAudio("b", "t9");
+    expect(api.clipDetachAudio).toHaveBeenLastCalledWith("b", "t9");
+    expect(s.error).toContain("no audio");
+  });
+});
+
 describe("derived state", () => {
   it("starts empty", () => {
     const s = useProjectStore();
@@ -285,6 +343,8 @@ describe("mutations", () => {
     await s.overlayMove("o", 100, 1); await s.overlayLayerAdd(); await s.overlayLayerRemove(1); await s.overlayTrim("o", 0, 2000); await s.overlaySetFades("o", 1, 2);
     await s.overlaySetPlacement("o", { scale: 0.5, x: 0.1, y: 0.2 });
     await s.audioTrackAdd("SFX"); await s.audioTrackUpdate("t", "Narration", true); await s.audioTrackRemove("t");
+    await s.renameClip("c", "Intro");
+    expect(api.clipRename).toHaveBeenCalledWith("c", "Intro");
     await s.audioClipTrim("c", 1, 500); await s.audioClipSet("c", 0.5, 10, 20, true);
     await s.poolAdd(["/a.mp3", "/b.png"]); await s.poolRemove("p"); await s.insertClip("/v.mp4", 1);
     expect(api.overlayMove).toHaveBeenCalledWith("o", 100, 1);

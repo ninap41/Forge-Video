@@ -22,6 +22,9 @@ describe("api → invoke mapping", () => {
     await api.clipSetFades("id", 10, 20);
     await api.clipSetTransition("id", { type: "DipToBlack", ms: 300 });
     await api.clipSetVolume("id", 0.5, true);
+    await api.clipRename("id", "Intro");
+    await api.clipDetachAudio("id");
+    await api.clipDetachAudio("id", "t1");
     await api.overlayAdd("/l.png", 100, 1);
     await api.overlaySetPlacement("o", { scale: 0.5, x: 0.1, y: 0.2 });
     await api.audioClipAdd("t", "/m.m4a", 250);
@@ -40,6 +43,9 @@ describe("api → invoke mapping", () => {
       ["clip_set_fades", { id: "id", fadeIn: 10, fadeOut: 20 }],
       ["clip_set_transition", { id: "id", transition: { type: "DipToBlack", ms: 300 } }],
       ["clip_set_volume", { id: "id", volume: 0.5, muted: true }],
+      ["clip_rename", { id: "id", name: "Intro" }],
+      ["clip_detach_audio", { id: "id", trackId: null }],
+      ["clip_detach_audio", { id: "id", trackId: "t1" }],
       ["overlay_add", { path: "/l.png", at: 100, layer: 1 }],
       ["overlay_set_placement", { id: "o", placement: { scale: 0.5, x: 0.1, y: 0.2 } }],
       ["audio_clip_add", { trackId: "t", path: "/m.m4a", at: 250 }],

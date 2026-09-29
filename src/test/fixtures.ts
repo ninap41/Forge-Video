@@ -71,7 +71,7 @@ export function mockApi(p: Project) {
     projectGet: resolved(p), projectNew: resolved(p), projectOpen: resolved(p), projectSave: resolved("/saved.forgevideo"),
     setAspect: resolved(p), setCrop: resolved(p), setVideoMuted: resolved(p), mediaImport: resolved(p), clipTrim: resolved(p),
     clipSplit: resolved({ project: p, new_id: "new" }), clipDelete: resolved(p), clipMove: resolved(p), clipSetFades: resolved(p),
-    clipSetTransition: resolved(p), clipSetVolume: resolved(p), clipInsert: resolved(p),
+    clipSetTransition: resolved(p), clipSetVolume: resolved(p), clipDetachAudio: resolved(p), clipRename: resolved(p), clipInsert: resolved(p),
     poolAdd: resolved(p), poolRemove: resolved(p),
     overlayAdd: resolved(p), overlayMove: resolved(p), overlayLayerAdd: resolved(p), overlayLayerRemove: resolved(p), overlayTrim: resolved(p), overlaySplit: resolved({ project: p, new_id: "new" }),
     overlayDelete: resolved(p), overlaySetFades: resolved(p), overlaySetPlacement: resolved(p),
@@ -89,7 +89,7 @@ export function mockApi(p: Project) {
 /** Make every project-returning command echo `p`, so edits do not wipe the store during component tests. */
 export function resolveWith(api: MockApi, p: Project) {
   for (const k of ["projectGet", "projectNew", "projectOpen", "setAspect", "setCrop", "setVideoMuted", "mediaImport", "clipTrim", "clipDelete", "clipMove",
-    "clipSetFades", "clipSetTransition", "clipSetVolume", "clipInsert", "poolAdd", "poolRemove",
+    "clipSetFades", "clipSetTransition", "clipSetVolume", "clipDetachAudio", "clipRename", "clipInsert", "poolAdd", "poolRemove",
     "overlayAdd", "overlayMove", "overlayLayerAdd", "overlayLayerRemove", "overlayTrim", "overlayDelete", "overlaySetFades", "overlaySetPlacement",
     "audioTrackAdd", "audioTrackUpdate", "audioTrackRemove", "audioClipAdd", "audioClipMove", "audioClipTrim", "audioClipDelete", "audioClipSet"] as const) {
     api[k].mockImplementation(() => Promise.resolve(p) as never);

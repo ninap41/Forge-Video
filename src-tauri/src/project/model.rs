@@ -131,6 +131,9 @@ impl Transition {
 pub struct Clip {
     pub id: Uuid,
     pub source: PathBuf,
+    /// User-given name shown on the timeline; `None` = the source file name.
+    #[serde(default)]
+    pub name: Option<String>,
     pub media: MediaInfo,
     pub source_start: Ms,
     pub source_end: Ms,
@@ -148,6 +151,7 @@ impl Clip {
         Clip {
             id: Uuid::new_v4(),
             source,
+            name: None,
             source_end: media.duration_ms,
             media,
             source_start: 0,
@@ -186,6 +190,9 @@ impl Placement {
 pub struct OverlayClip {
     pub id: Uuid,
     pub source: PathBuf,
+    /// User-given name shown on the timeline; `None` = the source file name.
+    #[serde(default)]
+    pub name: Option<String>,
     pub media: MediaInfo,
     pub source_start: Ms,
     /// For stills this is simply the on-screen length (source_start stays 0).
@@ -205,6 +212,7 @@ impl OverlayClip {
         OverlayClip {
             id: Uuid::new_v4(),
             source,
+            name: None,
             source_end: if still { STILL_DEFAULT_MS } else { media.duration_ms },
             media,
             source_start: 0,
@@ -228,6 +236,9 @@ impl OverlayClip {
 pub struct AudioClip {
     pub id: Uuid,
     pub source: PathBuf,
+    /// User-given name shown on the timeline; `None` = the source file name.
+    #[serde(default)]
+    pub name: Option<String>,
     pub media: MediaInfo,
     pub source_start: Ms,
     pub source_end: Ms,
@@ -243,6 +254,7 @@ impl AudioClip {
         AudioClip {
             id: Uuid::new_v4(),
             source,
+            name: None,
             source_end: media.duration_ms,
             media,
             source_start: 0,

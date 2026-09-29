@@ -233,6 +233,34 @@ describe("Preview", () => {
     expect(px(layers[1].attributes("style")!.match(/width: ([\d.]+)px/)![1])).toBeCloseTo(160, 0);
   });
 
+  it("an unplayable source raises a banner once and does not stall the clip change", async () => {
+    const { store, w } = await setup(project([clip({ id: "mkv", source: "/v/a.mkv" }), clip({ id: "b", source: "/v/b.mp4" })]));
+    await w.vm.$nextTick();
+    const v = w.find("video").element as HTMLVideoElement;
+    v.dispatchEvent(new Event("error"));
+    expect(store.notice).toBe("Preview can't play a.mkv here — export still works");
+    store.notify(null);
+    v.dispatchEvent(new Event("error"));
+    expect(store.notice).toBeNull();
+    // with readyState 0 and no metadata, nextSrcReady must still resolve on error
+    Object.defineProperty(HTMLMediaElement.prototype, "readyState", { value: 0, configurable: true });
+    store.playhead = 6000;
+    await w.vm.$nextTick();
+    await flush();
+    w.find("video").element.dispatchEvent(new Event("error"));
+    await flush();
+    expect(store.notice).toBe("Preview can't play b.mp4 here — export still works");
+    Object.defineProperty(HTMLMediaElement.prototype, "readyState", { value: 1, configurable: true });
+    // audio clips report too
+    const wav = audioClip({ id: "ac", source: "/audio/x.ogg", timeline_start: 0 });
+    store.project = project([clip({ id: "a", source: "/v/a.mp4" })], { audio_tracks: [audioTrack([wav], { id: "t1" })] });
+    store.playhead = 100;
+    await w.vm.$nextTick();
+    store.notify(null);
+    w.find("[data-testid=audio-clip]").element.dispatchEvent(new Event("error"));
+    expect(store.notice).toBe("Preview can't play x.ogg here — export still works");
+  });
+
   it("plays a still on V1 with a wall-clock, no <video>, then moves to the next clip", async () => {
     vi.useFakeTimers();
     const card = clip({ id: "card", source: "/images/title.png", media: stillMedia(), source_end: 1000 });

@@ -51,6 +51,8 @@ pub fn run() {
             commands::clip_set_fades,
             commands::clip_set_transition,
             commands::clip_set_volume,
+            commands::clip_detach_audio,
+            commands::clip_rename,
             commands::pool_add,
             commands::pool_remove,
             commands::clip_insert,

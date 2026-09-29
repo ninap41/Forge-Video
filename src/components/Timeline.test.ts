@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { audioClip, audioTrack, clip, overlay, poolItem, project, resolveWith, stillMedia, audioMedia, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, clip, media, overlay, poolItem, project, resolveWith, stillMedia, audioMedia, type MockApi } from "../test/fixtures";
 import FreeBlock from "./FreeBlock.vue";
 
 vi.mock("../api/tauri", async () => {
@@ -167,12 +167,12 @@ describe("Timeline", () => {
     expect(blocks[1].props("kind")).toBe("audio");
     expect(blocks[1].text()).toContain("bed.m4a");
     expect(w.text()).toContain("♪ SFX");
-    expect(w.text()).toContain("V2 · overlay");
-    expect(w.text()).not.toContain("V3 · overlay");
+    expect(w.text()).toContain("V2 · video");
+    expect(w.text()).not.toContain("V3 · video");
     expect(w.text()).not.toContain("No audio tracks");
     const { w: none } = setup();
     expect(none.text()).toContain("No audio tracks");
-    expect(none.text()).toContain("Drop a PNG or video here");
+    expect(none.text()).toContain("Drop video or a PNG here");
   });
 
   it("the V1 gutter has a track-level mute that also hides the waveforms", async () => {
@@ -196,8 +196,21 @@ describe("Timeline", () => {
   it("the gutter adds, mutes, renames and removes audio tracks", async () => {
     const { w } = setup(project([clip({ id: "a" })], { audio_tracks: [audioTrack([], { id: "t1", label: "Music" })] }));
     const gutterButtons = w.findAll("button");
-    await gutterButtons.find((b) => b.text() === "+ Track")!.trigger("click");
-    expect(api.audioTrackAdd).toHaveBeenCalledWith("Audio");
+    expect(gutterButtons.filter((b) => b.text().startsWith("+"))).toHaveLength(1);
+    await w.find("[data-testid=add-track]").trigger("click");
+    const items = w.findAll("[data-testid=add-track-menu] button");
+    expect(items.map((b) => b.text())).toEqual(["▶ Video track", "♪ Audio track", "♪ Music track", "♪ Narration track", "♪ SFX track"]);
+    await items[3].trigger("click");
+    expect(api.audioTrackAdd).toHaveBeenCalledWith("Narration");
+    expect(w.find("[data-testid=add-track-menu]").exists()).toBe(false);
+    // the button toggles; Escape and outside clicks close
+    await w.find("[data-testid=add-track]").trigger("click");
+    await w.find("[data-testid=add-track]").trigger("click");
+    expect(w.find("[data-testid=add-track-menu]").exists()).toBe(false);
+    await w.find("[data-testid=add-track]").trigger("click");
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=add-track-menu]").exists()).toBe(false);
     const mute = w.find("button[aria-label='Mute track']");
     expect(mute.classes()).toContain("text-accent");
     expect(mute.attributes("data-muted")).toBe("false");
@@ -265,9 +278,10 @@ describe("Timeline", () => {
     expect(api.audioClipMove.mock.calls).toEqual([["ac1", "t1", 3000]]);
   });
 
-  it("accepts pool drops on matching rows only", async () => {
+  it("accepts pool drops on matching rows only, and explains rejected drops in a banner", async () => {
     const p = project([clip({ id: "a" }), clip({ id: "b", source_end: 4000 })], { audio_tracks: [audioTrack([], { id: "t1" })] });
-    const { w } = setup(p);
+    const { store, w } = setup(p);
+    expect(w.find("[data-testid=timeline-tracks]").exists()).toBe(true);
     await w.vm.$nextTick();
     const scroller = w.find(".overflow-x-auto").element as HTMLElement;
     vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 1024, height: 200, right: 1024, bottom: 200, x: 0, y: 0, toJSON: () => ({}) });
@@ -277,34 +291,118 @@ describe("Timeline", () => {
     const wav = poolItem({ media: audioMedia(), path: "/audio/x.wav" });
     const mp4 = poolItem({ path: "/videos/c.mp4" });
     drop("overlay:0", png, 24 + 1500 * PX_PER_MS);
+    expect(store.notice).toBeNull();
     drop("overlay:0", wav, 24);
+    expect(store.notice).toBe("Audio goes on an audio track — drop it on a ♪ row");
+    store.notify(null);
     drop("video", wav, 24);
+    expect(store.notice).toBe("Audio goes on an audio track — drop it on a ♪ row");
+    store.notify(null);
     drop("video", png, 24);
     drop("video", mp4, 24 + 7000 * PX_PER_MS);
     drop("audio:t1", wav, 24 + 250 * PX_PER_MS);
+    expect(store.notice).toBeNull();
     drop("audio:t1", png, 24);
+    expect(store.notice).toBe("logo.png has no audio — video and images go on V1 or a video track");
+    store.notify(null);
+    drop("audio:t1", mp4, 24);
+    expect(store.notice).toBeNull();
     await flush();
+    drop("audio:t1", poolItem({ path: "/videos/silent.mp4", media: media({ has_audio: false }) }), 24);
+    expect(store.notice).toBe("silent.mp4 has no audio — video and images go on V1 or a video track");
+    store.notify(null);
     expect(api.overlayAdd).toHaveBeenCalledTimes(1);
     expect(api.overlayAdd).toHaveBeenCalledWith("/images/logo.png", 1500, 0);
     expect(api.clipInsert.mock.calls).toEqual([["/images/logo.png", 0], ["/videos/c.mp4", 1]]);
-    expect(api.audioClipAdd).toHaveBeenCalledTimes(1);
+    expect(api.audioClipAdd).toHaveBeenCalledTimes(2);
     expect(api.audioClipAdd).toHaveBeenCalledWith("t1", "/audio/x.wav", 250);
+    expect(api.audioClipAdd).toHaveBeenCalledWith("t1", "/videos/c.mp4", 0);
   });
 
-  it("overlay layers: rows per layer, add / remove, drag between layers, drop onto a higher layer", async () => {
+  it("right-click on a V1 clip offers Split audio from video; disabled for stills; closes on Escape or outside click", async () => {
+    const still = clip({ id: "png", source: "/images/logo.png", media: stillMedia(), source_end: 1000 });
+    const { store, w } = setup(project([clip({ id: "a" }), still]));
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=clip-menu]").exists()).toBe(false);
+    const blocks = w.findAllComponents(ClipBlock);
+    blocks[0].element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 80 }));
+    await w.vm.$nextTick();
+    const menu = w.find("[data-testid=clip-menu]");
+    expect(menu.exists()).toBe(true);
+    expect((menu.element as HTMLElement).style.left).toBe("120px");
+    expect(store.selectedClipId).toBe("a");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=clip-menu]").exists()).toBe(false);
+    blocks[0].element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await w.vm.$nextTick();
+    await w.find("[data-testid=clip-menu] button").trigger("click");
+    await flush();
+    expect(api.clipDetachAudio).toHaveBeenCalledWith("a", null);
+    expect(w.find("[data-testid=clip-menu]").exists()).toBe(false);
+    // a still has nothing to split
+    blocks[1].element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await w.vm.$nextTick();
+    const item = w.find("[data-testid=clip-menu] button");
+    expect(item.attributes("disabled")).toBeDefined();
+    expect(item.attributes("title")).toContain("no audio");
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=clip-menu]").exists()).toBe(false);
+    expect(api.clipDetachAudio).toHaveBeenCalledTimes(1);
+  });
+
+  it("right-click → Rename… works on V1, overlay and audio clips", async () => {
+    const ov = overlay({ id: "o", source_end: 2000 });
+    const ac = audioClip({ id: "m", source: "/audio/bed.m4a", name: "Theme" });
+    const { store, w } = setup(project([clip({ id: "a", source: "/videos/a.mp4" })], { overlays: [ov], audio_tracks: [audioTrack([ac], { id: "t1" })] }));
+    await w.vm.$nextTick();
+    expect(w.text()).toContain("♪ Theme");
+    const rename = async (el: Element, value: string, key = "Enter") => {
+      el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      await w.vm.$nextTick();
+      await w.find("[data-testid=clip-rename]").trigger("click");
+      const input = w.find("[data-testid=clip-name]");
+      const was = (input.element as HTMLInputElement).value;
+      (input.element as HTMLInputElement).value = value;
+      await input.trigger("keydown", { key });
+      await flush();
+      expect(w.find("[data-testid=clip-menu]").exists()).toBe(false);
+      return was;
+    };
+    expect(await rename(w.findComponent(ClipBlock).element, " Intro ")).toBe("a.mp4");
+    expect(api.clipRename).toHaveBeenLastCalledWith("a", "Intro");
+    const free = w.findAllComponents(FreeBlock);
+    await rename(free[0].element, "Logo");
+    expect(api.clipRename).toHaveBeenLastCalledWith("o", "Logo");
+    expect(store.selected).toEqual({ kind: "overlay", id: "o" });
+    // overlay and audio menus have no "Split audio from video"
+    expect(await rename(free[1].element, "")).toBe("Theme");
+    expect(api.clipRename).toHaveBeenLastCalledWith("m", "");
+    expect(api.clipRename).toHaveBeenCalledTimes(3);
+    // unchanged, the file name typed back on an unnamed clip, and Escape are all no-ops
+    await rename(free[1].element, "Theme");
+    await rename(w.findComponent(ClipBlock).element, "a.mp4");
+    await rename(free[0].element, "Nope", "Escape");
+    expect(api.clipRename).toHaveBeenCalledTimes(3);
+  });
+
+  it("video tracks above V1: rows per layer, add / remove, drag between layers, drop onto a higher layer", async () => {
     const lo = overlay({ id: "lo", timeline_start: 0, source_end: 2000, layer: 0 });
     const hi = overlay({ id: "hi", timeline_start: 500, source_end: 2000, layer: 1 });
     const { w } = setup(project([clip({ id: "a" })], { overlays: [lo, hi], overlay_layers: 2 }));
     await w.vm.$nextTick();
-    expect(w.text()).toContain("V3 · overlay");
+    expect(w.text()).toContain("V2 · video");
+    expect(w.text()).toContain("V3 · video");
     const rows = w.findAll("[data-row^='overlay:']");
     expect(rows.map((r) => r.attributes("data-row"))).toEqual(["overlay:0", "overlay:1"]);
     // V3 is drawn above V2
     expect(parseFloat((rows[1].element as HTMLElement).style.top)).toBeLessThan(parseFloat((rows[0].element as HTMLElement).style.top));
     expect(rows[1].findAllComponents(FreeBlock)[0].props("clip").id).toBe("hi");
-    await w.findAll("button").find((b) => b.text() === "+ Layer")!.trigger("click");
+    await w.find("[data-testid=add-track]").trigger("click");
+    await w.find("[data-testid=add-track-menu] button").trigger("click");
     expect(api.overlayLayerAdd).toHaveBeenCalled();
-    await w.find("button[title='Remove layer V3']").trigger("click");
+    await w.find("button[title='Remove track V3']").trigger("click");
     expect(api.overlayLayerRemove).toHaveBeenCalledWith(1);
     // drag lo up onto the V3 row
     const scroller = w.find(".overflow-x-auto");

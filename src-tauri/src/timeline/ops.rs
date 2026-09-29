@@ -155,6 +155,24 @@ pub fn set_transition(p: &mut Project, id: Uuid, t: Transition) -> Result<()> {
     Ok(())
 }
 
+/// Longest clip name kept, in characters.
+pub const NAME_MAX: usize = 80;
+
+/// Rename a clip on any track (V1, overlay or audio). A blank name restores the file name.
+pub fn rename(p: &mut Project, id: Uuid, name: &str) -> Result<()> {
+    let name = name.trim();
+    let name = (!name.is_empty()).then(|| name.chars().take(NAME_MAX).collect::<String>());
+    if let Some(c) = p.clips.iter_mut().find(|c| c.id == id) {
+        c.name = name;
+    } else if let Some(o) = p.overlays.iter_mut().find(|o| o.id == id) {
+        o.name = name;
+    } else {
+        let (t, c) = aidx(p, id)?;
+        p.audio_tracks[t].clips[c].name = name;
+    }
+    Ok(())
+}
+
 pub fn set_volume(p: &mut Project, id: Uuid, volume: f32, muted: bool) -> Result<()> {
     let i = idx(p, id)?;
     p.clips[i].volume = volume.clamp(0.0, 2.0);
@@ -360,6 +378,31 @@ pub fn audio_clip_add(p: &mut Project, track_id: Uuid, mut clip: AudioClip, at: 
     claim_audio(&mut p.audio_tracks[ti], ci);
     relayout(p);
     Ok(id)
+}
+
+/// "Split audio from video": copy the V1 clip's audio onto an audio track as a free clip with the
+/// same range, volume and fades, and mute the video clip. Uses the first track, adding one if needed.
+pub fn detach_audio(p: &mut Project, id: Uuid, track_id: Option<Uuid>) -> Result<Uuid> {
+    let i = idx(p, id)?;
+    let c = &p.clips[i];
+    if !c.media.has_audio || c.media.is_still {
+        return Err(Error::InvalidEdit("clip has no audio to split off".into()));
+    }
+    let mut a = AudioClip::new(c.source.clone(), c.media.clone());
+    a.name = c.name.clone();
+    a.source_start = c.source_start;
+    a.source_end = c.source_end;
+    a.volume = c.volume;
+    a.fade_in = c.fade_in;
+    a.fade_out = c.fade_out;
+    let at = c.timeline_start;
+    let track = match track_id.or_else(|| p.audio_tracks.first().map(|t| t.id)) {
+        Some(t) => t,
+        None => audio_track_add(p, "Audio"),
+    };
+    let new_id = audio_clip_add(p, track, a, at)?;
+    p.clips[i].muted = true;
+    Ok(new_id)
 }
 
 /// Move within or between tracks.
@@ -686,6 +729,29 @@ mod edge_tests {
         set_fades(&mut p, id, 300, 900).unwrap();
         assert_eq!((p.clips[0].fade_in, p.clips[0].fade_out), (300, 700));
         assert!(set_fades(&mut p, Uuid::new_v4(), 0, 0).is_err());
+    }
+
+    #[test]
+    fn rename_reaches_every_track_and_blank_restores_the_file_name() {
+        let mut p = proj(&[2000]);
+        let v = p.clips[0].id;
+        let o = overlay_add(&mut p, OverlayClip::new("/o.mp4".into(), media(1000)), 0, 0);
+        let t = audio_track_add(&mut p, "Music");
+        let a = audio_clip_add(&mut p, t, AudioClip::new("/a.m4a".into(), media(1000)), 0).unwrap();
+        rename(&mut p, v, "  Intro  ").unwrap();
+        rename(&mut p, o, "Logo").unwrap();
+        rename(&mut p, a, &"x".repeat(200)).unwrap();
+        assert_eq!(p.clips[0].name.as_deref(), Some("Intro"));
+        assert_eq!(p.overlays[0].name.as_deref(), Some("Logo"));
+        assert_eq!(p.audio_tracks[0].clips[0].name.as_ref().unwrap().chars().count(), NAME_MAX);
+        // both halves of a split keep the name, and so does detached audio
+        let right = split(&mut p, v, 1000).unwrap();
+        assert_eq!(p.clips.iter().find(|c| c.id == right).unwrap().name.as_deref(), Some("Intro"));
+        let d = detach_audio(&mut p, v, Some(t)).unwrap();
+        assert_eq!(p.audio_tracks[0].clips.iter().find(|c| c.id == d).unwrap().name.as_deref(), Some("Intro"));
+        rename(&mut p, v, "   ").unwrap();
+        assert_eq!(p.clips[0].name, None);
+        assert!(rename(&mut p, Uuid::new_v4(), "x").is_err());
     }
 
     #[test]

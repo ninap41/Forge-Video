@@ -25,27 +25,29 @@ Non-login shells need `source ~/.cargo/env` before `cargo`. Run all three checks
 ## Supported features (V1)
 
 Media pool (bottom of the timeline panel)
-- Every imported file lives in the pool (`Project.pool`) with tabs Clips / Audio / Images, grid or list view (persisted in localStorage). **Import…**, **⌘I** and OS drag-and-drop add to the pool; video also lands on V1. Pointer-drag (never HTML5 DnD) a pool item onto a track, or double-click to place it at the playhead.
+- Every imported file lives in the pool (`Project.pool`) with tabs All / Clips / Audio / Images, grid or list view (persisted in localStorage). **Import…**, **⌘I** and OS drag-and-drop add to the pool; video also lands on V1. Pointer-drag (never HTML5 DnD) a pool item onto a track, or double-click to place it at the playhead. The same file (compared by canonical path) is never pooled twice, and `project_open` re-probes the pool so stale `MediaInfo` (e.g. an mp3 whose cover art once read as video) is corrected. `probe.rs` ignores cover-art streams and treats MJPEG with a duration as video. `Banner.vue` shows `store.notify(...)` for a few seconds: duplicate imports, audio dropped on a video row, video/images dropped on an audio row, audio dropped with no audio track, and Finder drops that land on the timeline (they still go to the pool).
 
 V1 video track (`Project.clips`)
-- H.264/HEVC/etc. video (mp4, mov, m4v, mkv, webm, avi, mts, m2ts) **or a still image** (png/jpeg/webp; 5 s by default, trim to any length, rendered via `-loop 1 -t`, silent, previewed with a wall-clock instead of a `<video>`). Contiguous, ripple-edited.
+- Any video ffmpeg decodes (extension list in `src/utils/media.ts`: mp4, mov, m4v, mkv, webm, avi, mts, m2ts, 3gp, ts, mpg, mpeg, wmv, flv, mxf) **or a still image** (png/jpeg/webp/bmp/tiff; 5 s by default, trim to any length, rendered via `-loop 1 -t`, silent, previewed with a wall-clock instead of a `<video>`). Contiguous, ripple-edited.
 - **Trim** in/out points by dragging clip edges (frame-snapped, min clip 100 ms), rippling everything after.
 - **Split** the selected clip at the playhead (**⌘T**); left half keeps its id, fades/transition move to the right ends. Works for V2 and audio clips too.
 - **Delete** (**⌫**) and **reorder** by dragging a clip past its neighbour's midpoint. The timeline is always contiguous.
 - **Fade in / fade out** per clip (video + audio), capped at 5 s or the clip length.
 - **Transitions** between clips: Cut, **Cross dissolve**, **Dip to black** (100–3000 ms, clamped to half the shorter neighbour; the last clip never has one).
+- **Split audio from video** (right-click a V1 clip): `timeline::detach_audio` copies the clip's range, volume and fades to an `AudioClip` on the first audio track (created if none) and mutes the video clip.
+- **Rename** (right-click any clip on any track → Rename…): `name: Option<String>` on `Clip` / `OverlayClip` / `AudioClip`, set by the one `clip_rename` command (`timeline::rename`, trimmed, ≤ 80 chars, blank = file name). Splits and detached audio keep the name; display goes through `clipName()` in `src/types/project.ts`.
 - **Volume** per clip (0–200 %) and **mute**, plus a track-level mute (`Project.video_muted`, speaker icon in the V1 gutter) that silences every V1 clip.
 
 Overlay layers V2, V3, … (`Project.overlays`, `Project.overlay_layers`)
-- Any number of overlay rows for composite shots; each `OverlayClip.layer` picks its row and higher layers composite on top. Free-positioned, silent clips: video or stills (default 5 s, stretch by trimming). No overlap within a layer (a placed clip pushes what it lands on), no transitions. "+ Layer" in the timeline gutter adds a row; ✕ removes a row and its clips. Per-clip opacity fades and a `Placement` (width as a fraction of the frame + centre); stills default to a 35 % bottom-right badge, video to full frame. Drag / scroll-wheel the selected overlay in the preview. Overlays that start after V1 ends are ignored on export.
+- Any number of overlay rows for composite shots; each `OverlayClip.layer` picks its row and higher layers composite on top. Free-positioned, silent clips: video or stills (default 5 s, stretch by trimming). No overlap within a layer (a placed clip pushes what it lands on), no transitions. The gutter's single **+ Track** button opens a menu (Video / Audio / Music / Narration / SFX): Video adds an overlay row (labelled V2, V3, … · video), the rest add an audio track with that label; ✕ removes a row and its clips. Per-clip opacity fades and a `Placement` (width as a fraction of the frame + centre); stills default to a 35 % bottom-right badge, video to full frame. Drag / scroll-wheel the selected overlay in the preview. Overlays that start after V1 ends are ignored on export.
 
 Audio tracks (`Project.audio_tracks`)
-- Any number of labelled tracks (Music / SFX / Narration / Other, free text) with free-positioned clips (mp3/m4a/aac/wav/aiff/flac or the audio of a video): volume, fade in/out, mute per clip, mute per track. Every mute control is the `MuteToggle` speaker icon: green = audio on, grey struck-through = muted. Mixed under V1 audio with `amix` and trimmed to the video length on export. v1 project files with a `music` bed load as one "Music" track.
+- Any number of labelled tracks (Music / SFX / Narration / Other, free text) with free-positioned clips (mp3/m4a/aac/wav/aiff/aif/flac/ogg/oga/opus/caf/m4b/wma or the audio of a video): volume, fade in/out, mute per clip, mute per track. Every mute control is the `MuteToggle` speaker icon: green = audio on, grey struck-through = muted. Mixed under V1 audio with `amix` and trimmed to the video length on export. v1 project files with a `music` bed load as one "Music" track.
 
 Output
 - Aspect presets: **YouTube 16:9** 1920×1080, **Shorts/Reels 9:16** 1080×1920, **Square 1:1** 1080×1080, **LinkedIn 4:5** 1080×1350.
 - **Reposition/zoom** the source inside the preset (drag / scroll-wheel in the preview, 1–4×). Rotated phone footage uses its display size.
-- Preview mirrors the export's crop math, fades and dissolve opacity; **Space** play/pause, **←/→** frame nudge (**⇧** = 1 s), **Home/End**.
+- Preview mirrors the export's crop math, fades and dissolve opacity; media WebKit cannot play (mkv, avi, mts…) raises a banner instead of freezing playback; **Space** play/pause, **←/→** frame nudge (**⇧** = 1 s), **Home/End**.
 - **Help**: the **?** toolbar button (or the **?** key) opens a shortcuts dialog. `SHORTCUTS` in `src/components/HelpDialog.vue` is the single source; README's Keys table mirrors it.
 
 Export (**⌘E**)

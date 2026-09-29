@@ -7,7 +7,7 @@ use crate::project::{AspectPreset, AudioClip, Clip, Crop, MediaInfo, MediaKind, 
 use crate::render::{ExportPlan, ExportSettings};
 use crate::{timeline, AppState};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -34,12 +34,32 @@ pub fn project_new(state: S, name: String) -> Project {
     snapshot(&state)
 }
 
+/// Open a project and re-probe its pool so files saved with an older probe (e.g. an mp3 whose cover
+/// art made it a "still") come back with the right kind. Best effort: unreadable files keep their info.
 #[tauri::command]
-pub fn project_open(state: S, path: PathBuf) -> Result<Project> {
-    let p = crate::project::persist::load(&path)?;
+pub async fn project_open(state: S<'_>, path: PathBuf) -> Result<Project> {
+    let mut p = crate::project::persist::load(&path)?;
+    refresh_media(&mut p).await;
     *state.project.lock().unwrap() = p;
     *state.project_path.lock().unwrap() = Some(path);
     Ok(snapshot(&state))
+}
+
+async fn refresh_media(p: &mut Project) {
+    let mut fresh: Vec<(PathBuf, MediaInfo)> = Vec::new();
+    for item in &p.pool {
+        if let Ok(m) = crate::media::probe(&item.path).await {
+            if m.kind() != item.media.kind() { fresh.push((item.path.clone(), m)); }
+        }
+    }
+    if fresh.is_empty() { return; }
+    for (path, m) in fresh {
+        for i in p.pool.iter_mut().filter(|i| i.path == path) { i.media = m.clone(); }
+        for c in p.clips.iter_mut().filter(|c| c.source == path) { c.media = m.clone(); }
+        for o in p.overlays.iter_mut().filter(|o| o.source == path) { o.media = m.clone(); }
+        for t in p.audio_tracks.iter_mut() { for c in t.clips.iter_mut().filter(|c| c.source == path) { c.media = m.clone(); } }
+    }
+    timeline::relayout(p);
 }
 
 #[tauri::command]
@@ -70,9 +90,21 @@ pub fn project_set_crop(state: S, crop: Crop) -> Project {
     snapshot(&state)
 }
 
+/// Same file on disk, even when spelled differently (symlinks, `/var` vs `/private/var`, case).
+/// Falls back to plain path equality when either path cannot be resolved.
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// Probe a file, reusing the pool's cached `MediaInfo` when we already know it.
 async fn media_for(state: &S<'_>, path: &PathBuf) -> Result<MediaInfo> {
-    let known = state.project.lock().unwrap().pool.iter().find(|i| &i.path == path).map(|i| i.media.clone());
+    let known = state.project.lock().unwrap().pool.iter().find(|i| same_file(&i.path, path)).map(|i| i.media.clone());
     match known {
         Some(m) => Ok(m),
         None => crate::media::probe(path).await,
@@ -80,7 +112,7 @@ async fn media_for(state: &S<'_>, path: &PathBuf) -> Result<MediaInfo> {
 }
 
 fn pool_insert(p: &mut Project, path: &PathBuf, media: &MediaInfo) {
-    if !p.pool.iter().any(|i| &i.path == path) {
+    if !p.pool.iter().any(|i| same_file(&i.path, path)) {
         p.pool.push(PoolItem { id: Uuid::new_v4(), path: path.clone(), media: media.clone() });
     }
 }
@@ -296,6 +328,20 @@ pub fn clip_set_fades(state: S, id: Uuid, fade_in: Ms, fade_out: Ms) -> Result<P
 #[tauri::command]
 pub fn clip_set_transition(state: S, id: Uuid, transition: Transition) -> Result<Project> {
     with_project(&state, |p| timeline::set_transition(p, id, transition))?;
+    Ok(snapshot(&state))
+}
+
+/// Right-click → "Rename…" on a clip of any track. A blank name restores the file name.
+#[tauri::command]
+pub fn clip_rename(state: S, id: Uuid, name: String) -> Result<Project> {
+    with_project(&state, |p| timeline::rename(p, id, &name))?;
+    Ok(snapshot(&state))
+}
+
+/// Right-click → "Split audio from video". The V1 clip is muted and its audio becomes an audio-track clip.
+#[tauri::command]
+pub fn clip_detach_audio(state: S, id: Uuid, track_id: Option<Uuid>) -> Result<Project> {
+    with_project(&state, |p| timeline::detach_audio(p, id, track_id).map(|_| ()))?;
     Ok(snapshot(&state))
 }
 
@@ -534,6 +580,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opening_a_project_reprobes_stale_pool_media() {
+        let app = app();
+        let st = app.state::<AppState>();
+        let dir = tempfile::tempdir().unwrap();
+        // A project saved when the probe mistook the m4a for a 600x600 video.
+        let mut p = Project::new("stale");
+        let mut m = crate::media::probe(&fx("music.m4a")).await.unwrap();
+        assert_eq!(m.kind(), MediaKind::Audio);
+        m.width = 600; m.height = 600;
+        assert_eq!(m.kind(), MediaKind::Video);
+        p.pool.push(PoolItem { id: Uuid::new_v4(), path: fx("music.m4a"), media: m.clone() });
+        timeline::append(&mut p, Clip::new(fx("music.m4a"), m));
+        p.pool.push(PoolItem { id: Uuid::new_v4(), path: PathBuf::from("/gone/missing.mp4"), media: p.pool[0].media.clone() });
+        let file = dir.path().join("stale.forgevideo");
+        crate::project::persist::save(&p, &file).unwrap();
+        let p = project_open(st.clone(), file).await.unwrap();
+        assert_eq!(p.pool[0].media.kind(), MediaKind::Audio, "re-probed on open");
+        assert_eq!(p.clips[0].media.kind(), MediaKind::Audio, "clips using the file are updated too");
+        assert_eq!(p.pool[1].media.kind(), MediaKind::Video, "unreadable files keep what was saved");
+    }
+
+    #[tokio::test]
+    async fn detach_audio_moves_the_sound_to_a_track_and_mutes_the_clip() {
+        let app = app();
+        let st = app.state::<AppState>();
+        let p = media_import(st.clone(), fx("clip_a_720p.mp4")).await.unwrap();
+        let a = p.clips[0].id;
+        clip_trim(st.clone(), a, 500, 3000).unwrap();
+        clip_set_fades(st.clone(), a, 200, 300).unwrap();
+        let p = clip_detach_audio(st.clone(), a, None).unwrap();
+        assert!(p.clips[0].muted);
+        assert_eq!(p.audio_tracks.len(), 1, "a track is created when there is none");
+        let ac = &p.audio_tracks[0].clips[0];
+        assert_eq!((ac.source_start, ac.source_end, ac.timeline_start, ac.fade_in, ac.fade_out), (500, 3000, 0, 200, 300));
+        assert_eq!(ac.source, fx("clip_a_720p.mp4"));
+        // a still has nothing to detach
+        let p = media_import(st.clone(), fx("logo.png")).await.unwrap();
+        let png = p.clips[1].id;
+        assert!(clip_detach_audio(st.clone(), png, None).is_err());
+        // an explicit track is honoured
+        let p = audio_track_add(st.clone(), "SFX".into());
+        let sfx = p.audio_tracks[1].id;
+        let p = clip_detach_audio(st.clone(), a, Some(sfx)).unwrap();
+        assert_eq!(p.audio_tracks[1].clips.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pool_add_ignores_symlinked_duplicates() {
+        let app = app();
+        let st = app.state::<AppState>();
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("bed.m4a");
+        std::os::unix::fs::symlink(fx("music.m4a"), &link).unwrap();
+        let p = pool_add(st.clone(), fx("music.m4a")).await.unwrap();
+        assert_eq!(p.pool.len(), 1);
+        let p = pool_add(st.clone(), link.clone()).await.unwrap();
+        assert_eq!(p.pool.len(), 1, "a symlink to a pooled file is the same file");
+        let p = media_import(st.clone(), link).await.unwrap();
+        assert_eq!(p.pool.len(), 1);
+        assert!(same_file(Path::new("/definitely/missing/a"), Path::new("/definitely/missing/a")));
+        assert!(!same_file(Path::new("/definitely/missing/a"), Path::new("/definitely/missing/b")));
+    }
+
+    #[tokio::test]
     async fn overlay_and_audio_track_commands() {
         let app = app();
         let st = app.state::<AppState>();
@@ -572,6 +682,13 @@ mod tests {
         let p = audio_clip_add(st.clone(), t, fx("music.m4a"), 2000).await.unwrap();
         let c = p.audio_tracks[0].clips[0].id;
         assert_eq!(p.audio_tracks[0].clips[0].timeline_start, 2000);
+        let p = clip_rename(st.clone(), c, "Theme".into()).unwrap();
+        assert_eq!(p.audio_tracks[0].clips[0].name.as_deref(), Some("Theme"));
+        let p = clip_rename(st.clone(), o, "Logo".into()).unwrap();
+        assert_eq!(p.overlays[0].name.as_deref(), Some("Logo"));
+        let p = clip_rename(st.clone(), p.clips[0].id, "".into()).unwrap();
+        assert_eq!(p.clips[0].name, None);
+        assert!(clip_rename(st.clone(), Uuid::new_v4(), "x".into()).is_err());
         let p = audio_track_update(st.clone(), t, "Bed".into(), true).unwrap();
         assert_eq!((p.audio_tracks[0].label.as_str(), p.audio_tracks[0].muted), ("Bed", true));
         let p = audio_track_add(st.clone(), "SFX".into());
@@ -619,11 +736,11 @@ mod tests {
 
         project_new(st.clone(), "Other".into());
         assert!(matches!(project_save(st.clone(), None), Err(Error::InvalidEdit(_))), "new project forgets the path");
-        let p = project_open(st.clone(), file.clone()).unwrap();
+        let p = project_open(st.clone(), file.clone()).await.unwrap();
         assert_eq!(p.name, "Saved");
         assert_eq!(p.clips.len(), 1);
         assert_eq!(project_save(st.clone(), None).unwrap(), file, "open remembers the path");
-        assert!(project_open(st, dir.path().join("missing.forgevideo")).is_err());
+        assert!(project_open(st, dir.path().join("missing.forgevideo")).await.is_err());
     }
 
     #[tokio::test]

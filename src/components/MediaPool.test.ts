@@ -37,11 +37,14 @@ const btn = (w: ReturnType<typeof mount>, t: string) => w.findAll("button").find
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("MediaPool", () => {
-  it("tabs filter by kind and show counts", async () => {
+  it("tabs filter by kind and show counts; All is the default and lists everything", async () => {
     const { w } = setup();
+    expect(w.text()).toContain("All 4");
     expect(w.text()).toContain("Clips 2");
     expect(w.text()).toContain("Audio 1");
     expect(w.text()).toContain("Images 1");
+    for (const n of ["a.mp4", "b.mov", "bed.m4a", "logo.png"]) expect(w.text()).toContain(n);
+    await btn(w, "Clips").trigger("click");
     expect(w.text()).toContain("a.mp4");
     expect(w.text()).not.toContain("bed.m4a");
     await btn(w, "Audio").trigger("click");
@@ -56,6 +59,7 @@ describe("MediaPool", () => {
 
   it("toggles grid / list and persists the choice", async () => {
     const { store, w } = setup();
+    await btn(w, "Clips").trigger("click");
     expect(w.find("table").exists()).toBe(false);
     await w.find("button[aria-label='List view']").trigger("click");
     expect(store.poolView).toBe("list");
@@ -69,6 +73,7 @@ describe("MediaPool", () => {
 
   it("Import… opens a dialog filtered by the active tab and adds to the pool", async () => {
     const { w } = setup();
+    await btn(w, "Clips").trigger("click");
     dialogOpen.mockResolvedValueOnce(["/v/1.mp4", "/v/2.mp4"]);
     await btn(w, "Import…").trigger("click");
     await flush();
@@ -129,5 +134,52 @@ describe("MediaPool", () => {
     expect(received).toHaveBeenCalledWith(expect.objectContaining({ clientX: 200, item: expect.objectContaining({ id: "v1" }) }));
     efp.mockRestore();
     row.remove();
+  });
+
+  it("Import… from the All tab offers every media extension", async () => {
+    const { w } = setup();
+    dialogOpen.mockResolvedValue(["/new/x.wav"]);
+    await btn(w, "Import…").trigger("click");
+    const ext = dialogOpen.mock.calls[0][0].filters[0].extensions as string[];
+    expect(dialogOpen.mock.calls[0][0].filters[0].name).toBe("All");
+    for (const e of ["mp4", "mov", "mp3", "wav", "png", "webp"]) expect(ext).toContain(e);
+    await flush();
+    expect(api.poolAdd).toHaveBeenCalledWith("/new/x.wav");
+  });
+
+  it("dropping audio inside the timeline with no audio track shows a banner instead of silently doing nothing", async () => {
+    const { store, w } = setup();
+    await btn(w, "Audio").trigger("click");
+    const card = w.find("[data-testid=pool-items] > div > div");
+    const tracks = document.createElement("div");
+    tracks.dataset.testid = "timeline-tracks";
+    const inner = document.createElement("div");
+    tracks.appendChild(inner);
+    document.body.appendChild(tracks);
+    const efp = vi.spyOn(document, "elementFromPoint").mockReturnValue(inner);
+    await card.trigger("pointerdown", { button: 0, clientX: 10, clientY: 10 });
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 60, clientY: 40 }));
+    expect(store.poolDrag?.item.id).toBe("a1");
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 60, clientY: 40 }));
+    expect(store.poolDrag).toBeNull();
+    expect(store.notice).toBe("No audio track yet — click “+ Track”, then drop the audio there");
+    expect(api.audioClipAdd).not.toHaveBeenCalled();
+    // with a track present, a miss is just a miss
+    store.notify(null);
+    store.project = project([clip({ id: "a" })], { pool: items(), audio_tracks: [audioTrack([], { id: "t1" })] });
+    await w.vm.$nextTick();
+    await card.trigger("pointerdown", { button: 0, clientX: 10, clientY: 10 });
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 60, clientY: 40 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 60, clientY: 40 }));
+    expect(store.notice).toBeNull();
+    // and a video card released off any row says nothing
+    await btn(w, "Clips").trigger("click");
+    const video = w.find("[data-testid=pool-items] > div > div");
+    await video.trigger("pointerdown", { button: 0, clientX: 10, clientY: 10 });
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 60, clientY: 40 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 60, clientY: 40 }));
+    expect(store.notice).toBeNull();
+    efp.mockRestore();
+    tracks.remove();
   });
 });

@@ -11,15 +11,14 @@ import Timeline from "./components/Timeline.vue";
 import Inspector from "./components/Inspector.vue";
 import ExportDialog from "./components/ExportDialog.vue";
 import HelpDialog from "./components/HelpDialog.vue";
+import Banner from "./components/Banner.vue";
+import { MEDIA_EXT, VIDEO_EXT, isMediaPath } from "./utils/media";
+import { basename } from "./utils/time";
 
 const store = useProjectStore();
 const exportOpen = ref(false);
 const helpOpen = ref(false);
 const ffmpegMissing = ref(false);
-const VIDEO_EXT = ["mp4", "mov", "m4v", "mkv", "webm", "avi", "mts", "m2ts"];
-const AUDIO_EXT = ["mp3", "m4a", "aac", "wav", "aiff", "flac"];
-const IMAGE_EXT = ["png", "jpg", "jpeg", "webp"];
-const MEDIA_EXT = [...VIDEO_EXT, ...AUDIO_EXT, ...IMAGE_EXT];
 
 /** ⌘I: video lands on V1 and in the pool; audio and images go to the pool. */
 async function importDialog() {
@@ -86,8 +85,20 @@ onMounted(async () => {
   window.addEventListener("keydown", onKey);
   unlistenDrop = await getCurrentWebview().onDragDropEvent((e) => {
     if (e.payload.type !== "drop") return;
-    const paths = e.payload.paths.filter((p) => MEDIA_EXT.includes(p.split(".").pop()?.toLowerCase() ?? ""));
-    if (paths.length) void store.poolAdd(paths);
+    const paths = e.payload.paths.filter(isMediaPath);
+    const skipped = e.payload.paths.filter((p) => !isMediaPath(p));
+    if (skipped.length) {
+      const names = skipped.slice(0, 2).map(basename).join(", ") + (skipped.length > 2 ? ` +${skipped.length - 2} more` : "");
+      store.notify(`Skipped ${names} — not a supported media file`);
+    }
+    if (!paths.length) return;
+    // Finder drops only ever feed the pool; say so when they land on the timeline.
+    const pos = e.payload.position;
+    const dpr = window.devicePixelRatio || 1;
+    if (pos && document.elementFromPoint(pos.x / dpr, pos.y / dpr)?.closest("[data-testid=timeline-tracks]")) {
+      store.notify("Added to the media pool — drag from the pool onto the timeline");
+    }
+    void store.poolAdd(paths);
   });
   void getCurrentWindow().setTitle("ForgeVideo");
 });
@@ -127,5 +138,6 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); unlistenDr
 
     <ExportDialog :open="exportOpen" @close="exportOpen = false" />
     <HelpDialog :open="helpOpen" @close="helpOpen = false" />
+    <Banner />
   </div>
 </template>
