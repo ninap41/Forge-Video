@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { audioClip, audioTrack, clip, media, overlay, poolItem, project, resolveWith, stillMedia, audioMedia, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, clip, cue, highlight, media, overlay, poolItem, project, resolveWith, stillMedia, audioMedia, type MockApi } from "../test/fixtures";
 import FreeBlock from "./FreeBlock.vue";
 
 vi.mock("../api/tauri", async () => {
@@ -183,6 +183,10 @@ describe("Timeline", () => {
     expect(w.findAllComponents(ClipBlock)[0].props("peaks")).toBeUndefined(); // no waveform cached yet in this test
     await mute.trigger("click");
     expect(api.setVideoMuted).toHaveBeenCalledWith(true);
+    const fader = w.find("[data-testid=fader-v1]");
+    expect(fader.attributes("title")).toBe("V1 volume 100 %");
+    await fader.setValue("0.5");
+    expect(api.setVideoVolume).toHaveBeenCalledWith(0.5);
     store.project = { ...store.project!, video_muted: true };
     store.waveforms[store.clips[0].source] = [1, 2, 3];
     await w.vm.$nextTick();
@@ -215,14 +219,19 @@ describe("Timeline", () => {
     expect(mute.classes()).toContain("text-accent");
     expect(mute.attributes("data-muted")).toBe("false");
     await mute.trigger("click");
-    expect(api.audioTrackUpdate).toHaveBeenCalledWith("t1", "Music", true);
+    expect(api.audioTrackUpdate).toHaveBeenCalledWith("t1", "Music", true, 1);
     await w.find("button[title='Remove track']").trigger("click");
     expect(api.audioTrackRemove).toHaveBeenCalledWith("t1");
     await w.find("button[title='Rename Music']").trigger("click");
     const input = w.find("input[list=track-presets]");
     await input.setValue("Narration");
     await input.trigger("change");
-    expect(api.audioTrackUpdate).toHaveBeenLastCalledWith("t1", "Narration", false);
+    expect(api.audioTrackUpdate).toHaveBeenLastCalledWith("t1", "Narration", false, 1);
+    // the track fader sends label + mute unchanged with the new level
+    const fader = w.find("[data-testid=fader-t1]");
+    expect(fader.attributes("title")).toBe("Music volume 100 %");
+    await fader.setValue("0.25");
+    expect(api.audioTrackUpdate).toHaveBeenLastCalledWith("t1", "Music", false, 0.25);
   });
 
   it("selects and moves free clips in time, and audio clips between tracks", async () => {
@@ -352,6 +361,34 @@ describe("Timeline", () => {
     expect(api.clipDetachAudio).toHaveBeenCalledTimes(1);
   });
 
+  it("⇧-click selects several pieces and right-click offers Merge", async () => {
+    const { store, w } = setup(project([clip({ id: "a", source: "/v/x.mp4", source_end: 2000 }), clip({ id: "b", source: "/v/x.mp4", source_start: 2000, source_end: 4000 }), clip({ id: "c" })]));
+    await w.vm.$nextTick();
+    const blocks = w.findAllComponents(ClipBlock);
+    await blocks[0].trigger("pointerdown");
+    await blocks[1].trigger("pointerdown", { shiftKey: true });
+    expect(store.selectedAll.map((s) => s.id)).toEqual(["a", "b"]);
+    expect(blocks[0].props("selected") && blocks[1].props("selected")).toBe(true);
+    expect(blocks[2].props("selected")).toBe(false);
+    // right-clicking a selected piece keeps the pair; the menu offers Merge
+    blocks[1].element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await w.vm.$nextTick();
+    expect(store.selectedAll.map((s) => s.id)).toEqual(["a", "b"]);
+    const merge = w.find("[data-testid=clip-merge]");
+    expect(merge.text()).toBe("Merge 2 clips");
+    await merge.trigger("click");
+    await flush();
+    expect(api.clipMerge).toHaveBeenCalledWith(["a", "b"]);
+    expect(w.find("[data-testid=clip-menu]").exists()).toBe(false);
+    // right-clicking an unselected clip collapses the selection: no Merge
+    await blocks[0].trigger("pointerdown");
+    await blocks[1].trigger("pointerdown", { shiftKey: true });
+    blocks[2].element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await w.vm.$nextTick();
+    expect(store.selectedAll.map((s) => s.id)).toEqual(["c"]);
+    expect(w.find("[data-testid=clip-merge]").exists()).toBe(false);
+  });
+
   it("right-click → Rename… works on V1, overlay and audio clips", async () => {
     const ov = overlay({ id: "o", source_end: 2000 });
     const ac = audioClip({ id: "m", source: "/audio/bed.m4a", name: "Theme" });
@@ -417,5 +454,76 @@ describe("Timeline", () => {
     rows[1].element.dispatchEvent(new CustomEvent("pooldrop", { detail: { item: poolItem({ path: "/videos/c.mp4" }), clientX: 24 + 1000 * PX_PER_MS } }));
     await flush();
     expect(api.overlayAdd).toHaveBeenCalledWith("/videos/c.mp4", 1000, 1);
+  });
+
+  describe("captions and highlights", () => {
+    const talk = () => project([clip({ id: "a", source: "/v/a.mp4" }), clip({ id: "b", source: "/v/b.mp4", source_end: 4000 })], {
+      transcripts: [{ source: "/v/a.mp4", cues: [cue(0, 2000, "So here is the thing", { id: "c1" }), cue(2500, 4500, "nobody tells you", { id: "c2" })] }],
+      audio_tracks: [audioTrack([audioClip()])],
+    });
+    const top = (w: ReturnType<typeof mount>, sel: string) => parseFloat((w.find(sel).element as HTMLElement).style.top);
+
+    it("has no caption row until something is transcribed", () => {
+      const { w } = setup(project([clip({ id: "a" })], { audio_tracks: [audioTrack([audioClip()])] }));
+      expect(w.find("[data-row=caption]").exists()).toBe(false);
+      expect(w.find("[data-testid=caption-gutter]").exists()).toBe(false);
+      expect(top(w, "[data-row^='audio:']")).toBe(24 + 6 + 44 + 6 + 78 + 6);
+    });
+
+    it("lays captions out under V1 and moves the audio rows down", async () => {
+      const { w } = setup(talk());
+      await w.vm.$nextTick();
+      expect(w.find("[data-testid=caption-gutter]").text()).toBe("CC · captions");
+      expect(top(w, "[data-row=caption]")).toBe(24 + 6 + 44 + 6 + 78 + 6);
+      expect(top(w, "[data-row^='audio:']")).toBe(24 + 6 + 44 + 6 + 78 + 6 + 22 + 6);
+      const cues = w.findAll("[data-testid=cue]");
+      expect(cues.map((c) => c.text())).toEqual(["So here is the thing", "nobody tells you"]);
+      const st = (cues[1].element as HTMLElement).style;
+      expect(parseFloat(st.left)).toBeCloseTo(2500 * PX_PER_MS, 3);
+      expect(parseFloat(st.width)).toBeCloseTo(2000 * PX_PER_MS - 1, 3);
+    });
+
+    it("marks the caption under the playhead", async () => {
+      const { store, w } = setup(talk());
+      store.playhead = 3000;
+      await w.vm.$nextTick();
+      const cues = w.findAll("[data-testid=cue]");
+      expect(cues[0].classes()).not.toContain("border-accent/70");
+      expect(cues[1].classes()).toContain("border-accent/70");
+    });
+
+    it("double-click corrects a caption; Escape and unchanged text do nothing", async () => {
+      const { w } = setup(talk());
+      await w.vm.$nextTick();
+      const first = () => w.findAll("[data-testid=cue]")[0];
+      await first().trigger("dblclick");
+      const input = w.find("[data-testid=cue-text]");
+      expect((input.element as HTMLInputElement).value).toBe("So here is the thing");
+      await input.setValue("  So here's the thing ");
+      await input.trigger("keydown", { key: "Enter" });
+      expect(api.cueSetText).toHaveBeenCalledWith("c1", "So here's the thing");
+      expect(w.find("[data-testid=cue-text]").exists()).toBe(false);
+
+      api.cueSetText.mockClear();
+      await first().trigger("dblclick");
+      await w.find("[data-testid=cue-text]").setValue("discarded");
+      await w.find("[data-testid=cue-text]").trigger("keydown", { key: "Escape" });
+      expect(w.find("[data-testid=cue-text]").exists()).toBe(false);
+      await first().trigger("dblclick");
+      await w.find("[data-testid=cue-text]").trigger("blur");
+      expect(api.cueSetText).not.toHaveBeenCalled();
+    });
+
+    it("draws a band over every row for each highlight", async () => {
+      const { w } = setup(project([clip({ id: "a" }), clip({ id: "b", source_end: 4000 })], { highlights: [highlight({ start: 1000, end: 6000 }), highlight({ start: 7000, end: 9000 })] }));
+      await w.vm.$nextTick();
+      const bands = w.findAll("[data-testid=highlight-band]");
+      expect(bands).toHaveLength(2);
+      const st = (bands[0].element as HTMLElement).style;
+      expect(parseFloat(st.left)).toBeCloseTo(1000 * PX_PER_MS + 24, 3);
+      expect(parseFloat(st.width)).toBeCloseTo(5000 * PX_PER_MS, 3);
+      expect(st.top).toBe("24px");
+      expect(bands[0].classes()).toContain("pointer-events-none");
+    });
   });
 });

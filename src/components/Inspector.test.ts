@@ -194,7 +194,7 @@ describe("Inspector · overlay and audio clips", () => {
     await w.vm.$nextTick();
     expect(section.findAll("button[data-muted]")[0].classes()).toContain("text-muted");
     await toggles[1].trigger("click");
-    expect(api.audioTrackUpdate).toHaveBeenCalledWith("t1", "Narration", true);
+    expect(api.audioTrackUpdate).toHaveBeenCalledWith("t1", "Narration", true, 1);
     await byText(w, "Delete").trigger("click");
     expect(api.audioClipDelete).toHaveBeenCalledWith("ac1");
   });

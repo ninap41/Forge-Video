@@ -18,7 +18,7 @@ const MIN_CLIP = 100;
 const SNAP_PX = 8;
 
 /** Row heights (px). The label gutter on the left mirrors these exactly. */
-const ROW = { ruler: 24, overlay: 44, video: 78, audio: 32, gap: 6 } as const;
+const ROW = { ruler: 24, overlay: 44, video: 78, caption: 22, audio: 32, gap: 6 } as const;
 
 const fitPxPerMs = computed(() => Math.max(0.005, (viewW.value - PAD * 2) / Math.max(store.duration, 10_000)));
 const pxPerMs = computed(() => fitPxPerMs.value * zoom.value);
@@ -292,15 +292,30 @@ onBeforeUnmount(() => { window.removeEventListener("pointerdown", onWindowDown);
 
 // ---- audio track gutter ----
 const editingLabel = ref<string | null>(null);
-function commitLabel(trackId: string, e: Event, muted: boolean) {
+/** A gutter fader: 0–100 % of the track's clips. */
+const pct = (v: number) => `${Math.round(v * 100)} %`;
+function commitLabel(trackId: string, e: Event, muted: boolean, volume: number) {
   editingLabel.value = null;
-  void store.audioTrackUpdate(trackId, (e.target as HTMLInputElement).value, muted);
+  void store.audioTrackUpdate(trackId, (e.target as HTMLInputElement).value, muted, volume);
 }
 const overlaysH = computed(() => store.overlayLayers * (ROW.overlay + ROW.gap));
 const videoTop = computed(() => ROW.ruler + ROW.gap + overlaysH.value);
-const audioTop = computed(() => videoTop.value + ROW.video + ROW.gap);
+/** Captions sit right under V1. The row only exists once something has been transcribed. */
+const captionTop = computed(() => videoTop.value + ROW.video + ROW.gap);
+const hasCaptions = computed(() => store.cues.length > 0);
+const audioTop = computed(() => captionTop.value + (hasCaptions.value ? ROW.caption + ROW.gap : 0));
+const editingCue = ref<string | null>(null);
+function commitCue(id: string, before: string, e: Event) {
+  if (editingCue.value !== id) return; // Escape already closed it
+  editingCue.value = null;
+  const text = (e.target as HTMLInputElement).value.trim();
+  if (text !== before) void store.setCueText(id, text);
+}
 const tracksHeight = computed(() => audioTop.value + store.audioTracks.length * (ROW.audio + ROW.gap) + 24);
-const isSelected = (kind: "clip" | "overlay" | "audio", id: string) => store.selected?.kind === kind && store.selected.id === id;
+const isSelected = (kind: "clip" | "overlay" | "audio", id: string) => store.selectedAll.some((s) => s.kind === kind && s.id === id);
+/** Merge is offered when the right-clicked clip is one of two or more selected pieces on its row. */
+const mergeCount = computed(() => (menu.value && isSelected(menu.value.kind, menu.value.clip.id) ? store.selectedAll.length : 0));
+async function mergeSelected() { menu.value = null; await store.mergeSelected(); }
 const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "ring-1 ring-inset ring-accent/60 bg-accent/5" : "opacity-40");
 </script>
 
@@ -328,18 +343,35 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
           <span class="flex-1 truncate">V{{ layer + 2 }} · video</span>
           <button v-if="store.overlayLayers > 1" class="w-4 text-center hover:text-danger" :title="`Remove track V${layer + 2}`" @click="store.overlayLayerRemove(layer)">✕</button>
         </div>
-        <div class="px-2 flex items-center gap-1" :style="{ height: ROW.video + 'px', marginBottom: ROW.gap + 'px' }">
-          <span class="flex-1 truncate">V1 · video</span>
-          <MuteToggle :muted="!!store.project?.video_muted" label="video audio" :size="14" @toggle="store.setVideoMuted(!store.project?.video_muted)" />
-        </div>
-        <div v-for="{ track } in displayTracks" :key="track.id" class="px-1 flex items-center gap-1" :style="{ height: ROW.audio + 'px', marginBottom: ROW.gap + 'px' }">
+        <div class="px-2 flex flex-col justify-center gap-1" :style="{ height: ROW.video + 'px', marginBottom: ROW.gap + 'px' }">
+          <div class="flex items-center gap-1">
+            <span class="flex-1 truncate">V1 · video</span>
+            <MuteToggle :muted="!!store.project?.video_muted" label="video audio" :size="14" @toggle="store.setVideoMuted(!store.project?.video_muted)" />
+          </div>
           <input
-            v-if="editingLabel === track.id" :value="track.label" list="track-presets" class="w-12 bg-panel-2 border border-line rounded px-1 text-fg" autofocus
-            @change="commitLabel(track.id, $event, track.muted)" @blur="commitLabel(track.id, $event, track.muted)" @keydown.enter="($event.target as HTMLInputElement).blur()"
+            type="range" min="0" max="1" step="0.05" class="fader" data-testid="fader-v1" aria-label="V1 volume"
+            :value="store.project?.video_volume ?? 1" :title="`V1 volume ${pct(store.project?.video_volume ?? 1)}`"
+            @input="store.setVideoVolume(Number(($event.target as HTMLInputElement).value))"
           />
-          <button v-else class="flex-1 text-left truncate hover:text-fg" :title="'Rename ' + track.label" @click="editingLabel = track.id">♪ {{ track.label }}</button>
-          <MuteToggle :muted="track.muted" label="track" :size="14" @toggle="store.audioTrackUpdate(track.id, track.label, !track.muted)" />
-          <button class="w-4 text-center hover:text-danger" title="Remove track" @click="store.audioTrackRemove(track.id)">✕</button>
+        </div>
+        <div v-if="hasCaptions" class="px-2 flex items-center" data-testid="caption-gutter" :style="{ height: ROW.caption + 'px', marginBottom: ROW.gap + 'px' }">
+          <span class="flex-1 truncate" title="Double-click a caption to correct it">CC · captions</span>
+        </div>
+        <div v-for="{ track } in displayTracks" :key="track.id" class="px-1 flex flex-col justify-center gap-0.5" :style="{ height: ROW.audio + 'px', marginBottom: ROW.gap + 'px' }">
+          <div class="flex items-center gap-1">
+            <input
+              v-if="editingLabel === track.id" :value="track.label" list="track-presets" class="w-12 bg-panel-2 border border-line rounded px-1 text-fg" autofocus
+              @change="commitLabel(track.id, $event, track.muted, track.volume)" @blur="commitLabel(track.id, $event, track.muted, track.volume)" @keydown.enter="($event.target as HTMLInputElement).blur()"
+            />
+            <button v-else class="flex-1 text-left truncate hover:text-fg" :title="'Rename ' + track.label" @click="editingLabel = track.id">♪ {{ track.label }}</button>
+            <MuteToggle :muted="track.muted" label="track" :size="14" @toggle="store.audioTrackUpdate(track.id, track.label, !track.muted, track.volume)" />
+            <button class="w-4 text-center hover:text-danger" title="Remove track" @click="store.audioTrackRemove(track.id)">✕</button>
+          </div>
+          <input
+            type="range" min="0" max="1" step="0.05" class="fader" :data-testid="'fader-' + track.id" :aria-label="`${track.label} volume`"
+            :value="track.volume" :title="`${track.label} volume ${pct(track.volume)}`"
+            @input="store.audioTrackUpdate(track.id, track.label, track.muted, Number(($event.target as HTMLInputElement).value))"
+          />
         </div>
         <datalist id="track-presets"><option value="Music" /><option value="SFX" /><option value="Narration" /><option value="Other" /></datalist>
       </div>
@@ -365,7 +397,7 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
               <FreeBlock
                 v-for="o in clips" :key="o.id" :clip="o" kind="overlay" :px-per-ms="pxPerMs" :selected="isSelected('overlay', o.id)"
                 :thumbs="store.thumbs[o.source]" :dimmed="o.timeline_start >= store.duration"
-                @select="store.select({ kind: 'overlay', id: o.id })"
+                @select="store.select({ kind: 'overlay', id: o.id }, $event)"
                 @trim-start="startFreeTrim({ kind: 'overlay', clip: o }, $event, 'freeTrimStart')" @trim-end="startFreeTrim({ kind: 'overlay', clip: o }, $event, 'freeTrimEnd')"
                 @drag-start="startFreeMove({ kind: 'overlay', clip: o }, $event)" @context-menu="openMenu({ kind: 'overlay', clip: o }, $event)"
               />
@@ -382,10 +414,31 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
             <div class="relative h-full">
               <ClipBlock
                 v-for="(c, i) in displayClips" :key="c.id" :clip="c" :index="i" :px-per-ms="pxPerMs"
-                :selected="c.id === store.selectedClipId" :thumbs="store.thumbs[c.source]" :peaks="store.project?.video_muted ? undefined : store.waveforms[c.source]"
-                @select="store.select(c.id)" @trim-start="startTrim(c, $event, 'trimStart')" @trim-end="startTrim(c, $event, 'trimEnd')" @drag-start="startMove(c, $event)"
+                :selected="isSelected('clip', c.id)" :thumbs="store.thumbs[c.source]" :peaks="store.project?.video_muted ? undefined : store.waveforms[c.source]"
+                @select="store.select(c.id, $event)" @trim-start="startTrim(c, $event, 'trimStart')" @trim-end="startTrim(c, $event, 'trimEnd')" @drag-start="startMove(c, $event)"
                 @context-menu="openMenu({ kind: 'clip', clip: c }, $event)"
               />
+            </div>
+          </div>
+
+          <!-- captions: derived from the transcript, so they follow every edit to V1 -->
+          <div
+            v-if="hasCaptions" class="absolute inset-x-0 rounded-sm" data-row="caption"
+            :style="{ top: captionTop + 'px', height: ROW.caption + 'px', paddingLeft: PAD + 'px' }" @pointerdown="startScrub"
+          >
+            <div class="relative h-full">
+              <div
+                v-for="(c, i) in store.cues" :key="i" data-testid="cue" class="absolute top-0 h-full rounded-sm border border-line bg-panel-2 text-[10px] leading-[20px] text-fg/90 px-1 truncate"
+                :class="store.currentCue?.id === c.id && store.currentCue.start === c.start ? 'border-accent/70' : ''"
+                :style="{ left: c.start * pxPerMs + 'px', width: Math.max(1, (c.end - c.start) * pxPerMs - 1) + 'px' }" :title="c.text"
+                @dblclick="editingCue = c.id"
+              >
+                <input
+                  v-if="editingCue === c.id" v-focus data-testid="cue-text" aria-label="Caption text" :value="c.text" class="absolute inset-y-0 left-0 min-w-56 w-full bg-panel border border-accent rounded-sm px-1 text-fg z-30"
+                  @pointerdown.stop @keydown.stop @keydown.enter="commitCue(c.id, c.text, $event)" @keydown.escape="editingCue = null" @blur="commitCue(c.id, c.text, $event)"
+                />
+                <template v-else>{{ c.text }}</template>
+              </div>
             </div>
           </div>
 
@@ -400,7 +453,7 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
               <FreeBlock
                 v-for="c in clips" :key="c.id" :clip="c" kind="audio" :px-per-ms="pxPerMs" :selected="isSelected('audio', c.id)"
                 :peaks="store.waveforms[c.source]" :dimmed="c.timeline_start >= store.duration"
-                @select="store.select({ kind: 'audio', id: c.id, trackId: track.id })"
+                @select="store.select({ kind: 'audio', id: c.id, trackId: track.id }, $event)"
                 @trim-start="startFreeTrim({ kind: 'audio', clip: c, trackId: track.id }, $event, 'freeTrimStart')" @trim-end="startFreeTrim({ kind: 'audio', clip: c, trackId: track.id }, $event, 'freeTrimEnd')"
                 @drag-start="startFreeMove({ kind: 'audio', clip: c, trackId: track.id }, $event)" @context-menu="openMenu({ kind: 'audio', clip: c }, $event)"
               />
@@ -409,6 +462,12 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
           <div v-if="!displayTracks.length" class="absolute inset-x-0 text-[11px] text-muted/60 pl-7 pt-1 pointer-events-none" :style="{ top: audioTop + 'px' }">
             No audio tracks · click “+ Track”, then drop audio from the pool
           </div>
+
+          <!-- highlights suggested by AI mode -->
+          <div
+            v-for="h in store.highlights" :key="h.id" data-testid="highlight-band" class="absolute bottom-0 bg-accent/10 border-x border-accent/50 pointer-events-none z-10"
+            :style="{ top: ROW.ruler + 'px', left: h.start * pxPerMs + PAD + 'px', width: (h.end - h.start) * pxPerMs + 'px' }"
+          />
 
           <!-- playhead -->
           <div class="absolute top-0 bottom-0 w-px bg-accent pointer-events-none z-20" :style="{ left: store.playhead * pxPerMs + PAD + 'px' }">
@@ -431,6 +490,10 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
         @keydown.enter="commitName" @keydown.escape.stop="menu = null" @blur="commitName"
       />
       <template v-else>
+        <button
+          v-if="mergeCount >= 2" role="menuitem" data-testid="clip-merge" class="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-black"
+          title="Join the selected pieces of one file back into a single clip" @click="mergeSelected"
+        >Merge {{ mergeCount }} clips</button>
         <button
           v-if="menu.kind === 'clip'"
           role="menuitem" class="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-black disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg"

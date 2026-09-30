@@ -10,6 +10,9 @@ pub enum Error {
     Media(String),
     #[error("ffmpeg/ffprobe not found on PATH: {0}")]
     BinaryNotFound(String),
+    /// whisper-cli / claude: missing, or ran and failed. The message is shown as is.
+    #[error("{0}")]
+    Tool(String),
     #[error("export failed: {0}")]
     Export(String),
     #[error("cancelled")]
@@ -41,6 +44,7 @@ mod tests {
         assert_eq!(Error::Media("m".into()).to_string(), "media error: m");
         assert_eq!(Error::BinaryNotFound("ffmpeg".into()).to_string(), "ffmpeg/ffprobe not found on PATH: ffmpeg");
         assert_eq!(Error::Export("e".into()).to_string(), "export failed: e");
+        assert_eq!(Error::Tool("whisper-cli not found".into()).to_string(), "whisper-cli not found");
         assert_eq!(Error::Cancelled.to_string(), "cancelled");
     }
 

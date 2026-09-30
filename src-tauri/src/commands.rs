@@ -3,7 +3,8 @@
 
 use crate::error::{Error, Result};
 use crate::jobs::{JobDone, JobError, JobProgress, EVT_DONE, EVT_ERROR, EVT_PROGRESS};
-use crate::project::{AspectPreset, AudioClip, Clip, Crop, MediaInfo, MediaKind, Ms, OverlayClip, Placement, PoolItem, Project, Transition};
+use crate::ai::{self, Cancel};
+use crate::project::{AspectPreset, AudioClip, Clip, Crop, MediaInfo, MediaKind, Ms, OverlayClip, Placement, PoolItem, Project, Transcript, Transition};
 use crate::render::{ExportPlan, ExportSettings};
 use crate::{timeline, AppState};
 use serde::Serialize;
@@ -81,6 +82,13 @@ pub fn project_set_aspect(state: S, aspect: AspectPreset) -> Project {
 #[tauri::command]
 pub fn project_set_video_muted(state: S, muted: bool) -> Project {
     state.project.lock().unwrap().video_muted = muted;
+    snapshot(&state)
+}
+
+/// V1 track fader (0–1), applied on top of every clip's own volume.
+#[tauri::command]
+pub fn project_set_video_volume(state: S, volume: f32) -> Project {
+    state.project.lock().unwrap().video_volume = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 };
     snapshot(&state)
 }
 
@@ -235,8 +243,8 @@ pub fn audio_track_add(state: S, label: String) -> Project {
 }
 
 #[tauri::command]
-pub fn audio_track_update(state: S, id: Uuid, label: String, muted: bool) -> Result<Project> {
-    with_project(&state, |p| timeline::audio_track_update(p, id, &label, muted))?;
+pub fn audio_track_update(state: S, id: Uuid, label: String, muted: bool, volume: f32) -> Result<Project> {
+    with_project(&state, |p| timeline::audio_track_update(p, id, &label, muted, volume))?;
     Ok(snapshot(&state))
 }
 
@@ -299,6 +307,13 @@ pub fn clip_trim(state: S, id: Uuid, source_start: Ms, source_end: Ms) -> Result
 pub struct SplitResult {
     pub project: Project,
     pub new_id: Uuid,
+}
+
+/// Merge neighbouring pieces of one file (V1, an overlay layer or an audio track); `new_id` is the kept clip.
+#[tauri::command]
+pub fn clip_merge(state: S, ids: Vec<Uuid>) -> Result<SplitResult> {
+    let new_id = with_project(&state, |p| timeline::merge(p, &ids))?;
+    Ok(SplitResult { project: snapshot(&state), new_id })
 }
 
 #[tauri::command]
@@ -384,7 +399,7 @@ pub fn export_plan(state: S, settings: ExportSettings) -> Result<ExportPlan> {
 
 #[tauri::command]
 pub async fn export_start(app: AppHandle, state: S<'_>, settings: ExportSettings) -> Result<Uuid> {
-    let plan = crate::render::plan(&state.project.lock().unwrap(), &settings)?;
+    let (plan, cues) = with_project(&state, |p| Ok((crate::render::plan(p, &settings)?, ai::captions::timeline_cues(p))))?;
     let (job_id, cancel) = state.jobs.register();
     let kind = "export".to_string();
     let app2 = app.clone();
@@ -403,7 +418,8 @@ pub async fn export_start(app: AppHandle, state: S<'_>, settings: ExportSettings
         st.jobs.finish(job_id);
         match res {
             Ok(()) => {
-                let _ = app.emit(EVT_DONE, JobDone { job_id, kind, result: serde_json::json!({ "destination": plan.destination, "strategy": plan.strategy }) });
+                let captions = write_srt(&plan.destination, &cues);
+                let _ = app.emit(EVT_DONE, JobDone { job_id, kind, result: serde_json::json!({ "destination": plan.destination, "strategy": plan.strategy, "captions": captions }) });
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&plan.destination);
@@ -428,6 +444,178 @@ pub struct FfmpegStatus {
 #[tauri::command]
 pub fn ffmpeg_status() -> FfmpegStatus {
     FfmpegStatus { ffmpeg: crate::render::ffmpeg::ffmpeg_bin().ok(), ffprobe: crate::render::ffmpeg::ffprobe_bin().ok() }
+}
+
+// ---------- AI mode ----------
+
+/// Captions travel beside the export as `<name>.srt`. `None` when there are none or it cannot be written.
+fn write_srt(destination: &Path, cues: &[crate::project::Cue]) -> Option<PathBuf> {
+    if cues.is_empty() {
+        return None;
+    }
+    let file = destination.with_extension("srt");
+    std::fs::write(&file, ai::captions::to_srt(cues)).ok().map(|_| file)
+}
+
+/// Async so the `claude auth status` subprocess never blocks the main thread.
+#[tauri::command]
+pub async fn ai_status() -> ai::AiStatus {
+    tokio::task::spawn_blocking(ai::status).await.expect("status never panics")
+}
+
+/// Opens Terminal on `claude auth login`; the panel polls `ai_status` until an account appears.
+#[tauri::command]
+pub async fn ai_claude_login() -> Result<()> {
+    tokio::task::spawn_blocking(ai::claude_login).await.expect("login never panics")
+}
+
+/// Where the bundled install script lives: the app's resource dir (`target/debug` in dev).
+pub fn install_script_path(app: &AppHandle) -> Result<PathBuf> {
+    app.path().resource_dir().map(|d| d.join("install-ai.sh")).map_err(|e| Error::Tool(format!("no resource dir: {e}")))
+}
+
+/// Opens Terminal on `install-ai.sh`; the panel polls `ai_status` until the tools appear.
+#[tauri::command]
+pub async fn ai_install(app: AppHandle) -> Result<()> {
+    let script = install_script_path(&app)?;
+    tokio::task::spawn_blocking(move || ai::install_tools(&script)).await.expect("install never panics")
+}
+
+#[tauri::command]
+pub async fn ai_claude_logout() -> Result<()> {
+    tokio::task::spawn_blocking(ai::claude_logout).await.expect("logout never panics")
+}
+
+/// V1 sources with speech that have no transcript yet, in timeline order, each once.
+fn untranscribed(p: &Project) -> Vec<(PathBuf, Ms)> {
+    let mut out: Vec<(PathBuf, Ms)> = Vec::new();
+    for c in &p.clips {
+        let known = p.transcripts.iter().any(|t| t.source == c.source) || out.iter().any(|(s, _)| *s == c.source);
+        if c.media.has_audio && !c.media.is_still && !known {
+            out.push((c.source.clone(), c.media.duration_ms));
+        }
+    }
+    out
+}
+
+/// Finish an AI job: apply `res` to the project it started on and tell the UI.
+fn finish_ai_job(app: &AppHandle, job_id: Uuid, kind: String, project_id: Uuid, res: Result<Box<dyn FnOnce(&mut Project) + Send>>) {
+    let st: State<AppState> = app.state();
+    st.jobs.finish(job_id);
+    let res = res.and_then(|apply| {
+        with_project(&st, |p| {
+            if p.id != project_id {
+                return Err(Error::InvalidEdit("the project was closed while this was running".into()));
+            }
+            apply(p);
+            timeline::relayout(p);
+            Ok(p.clone())
+        })
+    });
+    match res {
+        Ok(project) => {
+            let _ = app.emit(EVT_DONE, JobDone { job_id, kind, result: serde_json::json!({ "project": project }) });
+        }
+        Err(e) => {
+            let _ = app.emit(EVT_ERROR, JobError { job_id, kind, error: e.to_string() });
+        }
+    }
+}
+
+/// Transcribe every V1 source that has speech. Emits `job://*` with kind `transcribe`.
+#[tauri::command]
+pub async fn ai_transcribe(app: AppHandle, state: S<'_>) -> Result<Uuid> {
+    let (project_id, sources) = with_project(&state, |p| Ok((p.id, untranscribed(p))))?;
+    if sources.is_empty() {
+        return Err(Error::InvalidEdit("nothing on the main track needs transcribing".into()));
+    }
+    let (whisper, model) = (ai::whisper_bin()?, ai::whisper_model()?);
+    let (job_id, cancel) = state.jobs.register();
+    let kind = "transcribe".to_string();
+    tauri::async_runtime::spawn(async move {
+        let cancel = Cancel::from_oneshot(cancel);
+        let n = sources.len() as f32;
+        let mut done: Vec<Transcript> = Vec::new();
+        let mut failed = None;
+        for (i, (source, duration_ms)) in sources.into_iter().enumerate() {
+            let name = source.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            let (app2, k) = (app.clone(), kind.clone());
+            let progress = move |f: f32| {
+                let _ = app2.emit(EVT_PROGRESS, JobProgress { job_id, kind: k.clone(), progress: (i as f32 + f) / n, message: Some(name.clone()) });
+            };
+            match ai::transcribe::transcribe(&source, duration_ms, &whisper, &model, progress, cancel.clone()).await {
+                Ok(cues) => done.push(Transcript { source, cues }),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        let res: Result<Box<dyn FnOnce(&mut Project) + Send>> = match failed {
+            Some(e) => Err(e),
+            None => Ok(Box::new(move |p: &mut Project| {
+                p.transcripts.retain(|t| done.iter().all(|d| d.source != t.source));
+                p.transcripts.extend(done);
+            })),
+        };
+        finish_ai_job(&app, job_id, kind, project_id, res);
+    });
+    Ok(job_id)
+}
+
+/// Ask Claude Code for sections worth cutting into shorts. Emits `job://*` with kind `highlights`.
+#[tauri::command]
+pub async fn ai_find_highlights(app: AppHandle, state: S<'_>) -> Result<Uuid> {
+    let (project_id, total, prompt) = with_project(&state, |p| Ok((p.id, p.duration_ms(), ai::highlights::build_prompt(p)?)))?;
+    let claude = ai::claude_bin()?;
+    let (job_id, cancel) = state.jobs.register();
+    let kind = "highlights".to_string();
+    tauri::async_runtime::spawn(async move {
+        let res = ai::highlights::find(&claude, prompt, total, Cancel::from_oneshot(cancel)).await;
+        let res = res.map(|found| Box::new(move |p: &mut Project| p.highlights = found) as Box<dyn FnOnce(&mut Project) + Send>);
+        finish_ai_job(&app, job_id, kind, project_id, res);
+    });
+    Ok(job_id)
+}
+
+/// Correct a misheard caption. A blank text removes the caption.
+#[tauri::command]
+pub fn cue_set_text(state: S, id: Uuid, text: String) -> Result<Project> {
+    with_project(&state, |p| {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let t = p.transcripts.iter_mut().find(|t| t.cues.iter().any(|c| c.id == id)).ok_or(Error::ClipNotFound(id))?;
+        if text.is_empty() {
+            t.cues.retain(|c| c.id != id);
+        } else if let Some(c) = t.cues.iter_mut().find(|c| c.id == id) {
+            c.text = text;
+        }
+        Ok(())
+    })?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
+pub fn highlight_delete(state: S, id: Uuid) -> Result<Project> {
+    with_project(&state, |p| {
+        let n = p.highlights.len();
+        p.highlights.retain(|h| h.id != id);
+        if p.highlights.len() == n { Err(Error::ClipNotFound(id)) } else { Ok(()) }
+    })?;
+    Ok(snapshot(&state))
+}
+
+/// Build the short for a highlight as its own project file beside this one. The open project is not changed.
+#[tauri::command]
+pub fn highlight_apply(state: S, id: Uuid) -> Result<PathBuf> {
+    let project_file = state.project_path.lock().unwrap().clone()
+        .ok_or_else(|| Error::InvalidEdit("save this project first, shorts are created next to it".into()))?;
+    let short = with_project(&state, |p| {
+        let h = p.highlights.iter().find(|h| h.id == id).ok_or(Error::ClipNotFound(id))?;
+        ai::short::build_short(p, h)
+    })?;
+    let file = ai::short::free_file(&project_file, &short.name);
+    crate::project::persist::save(&short, &file)?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -463,6 +651,10 @@ mod tests {
         assert!(project_set_video_muted(st.clone(), true).video_muted);
         assert!(project_get(st.clone()).video_muted, "video mute persisted");
         assert!(!project_set_video_muted(st.clone(), false).video_muted);
+        assert_eq!(project_set_video_volume(st.clone(), 0.4).video_volume, 0.4);
+        assert_eq!(project_set_video_volume(st.clone(), 7.0).video_volume, 1.0, "fader clamps to 1");
+        assert_eq!(project_set_video_volume(st.clone(), f32::NAN).video_volume, 1.0);
+        assert_eq!(project_set_video_volume(st.clone(), 1.0).video_volume, 1.0);
         assert_eq!(project_get(st).crop.scale, 1.0, "state persisted");
     }
 
@@ -486,6 +678,10 @@ mod tests {
         assert_eq!(r.project.clips.len(), 3);
         assert_eq!(r.project.clips[1].id, r.new_id);
         assert!(clip_split(st.clone(), Uuid::new_v4(), 1000).is_err());
+        let m = clip_merge(st.clone(), vec![r.new_id, a]).unwrap();
+        assert_eq!((m.new_id, m.project.clips.len()), (a, 2));
+        assert!(clip_merge(st.clone(), vec![a]).is_err());
+        clip_split(st.clone(), a, 1000).unwrap(); // back to three clips for the rest of the test
 
         let p = clip_set_fades(st.clone(), a, 200, 300).unwrap();
         assert_eq!((p.clips[0].fade_in, p.clips[0].fade_out), (200, 300));
@@ -689,8 +885,8 @@ mod tests {
         let p = clip_rename(st.clone(), p.clips[0].id, "".into()).unwrap();
         assert_eq!(p.clips[0].name, None);
         assert!(clip_rename(st.clone(), Uuid::new_v4(), "x".into()).is_err());
-        let p = audio_track_update(st.clone(), t, "Bed".into(), true).unwrap();
-        assert_eq!((p.audio_tracks[0].label.as_str(), p.audio_tracks[0].muted), ("Bed", true));
+        let p = audio_track_update(st.clone(), t, "Bed".into(), true, 0.5).unwrap();
+        assert_eq!((p.audio_tracks[0].label.as_str(), p.audio_tracks[0].muted, p.audio_tracks[0].volume), ("Bed", true, 0.5));
         let p = audio_track_add(st.clone(), "SFX".into());
         let sfx = p.audio_tracks[1].id;
         let p = audio_clip_move(st.clone(), c, sfx, 0).unwrap();
@@ -784,6 +980,90 @@ mod tests {
         assert!(s.ffmpeg.is_some() && s.ffprobe.is_some());
         let j = serde_json::to_value(&s).unwrap();
         assert!(j["ffmpeg"].is_string());
+    }
+
+    fn with_captions(st: &State<AppState>) -> (Uuid, Uuid) {
+        use crate::project::{Cue, Highlight, Range};
+        let mut p = st.project.lock().unwrap();
+        let source = p.clips[0].source.clone();
+        let cues = vec![
+            Cue { id: Uuid::new_v4(), start: 0, end: 1500, text: "So here is the thing".into() },
+            Cue { id: Uuid::new_v4(), start: 1500, end: 3000, text: "nobody tells you".into() },
+        ];
+        let cue = cues[0].id;
+        p.transcripts.push(Transcript { source, cues });
+        let h = Highlight {
+            id: Uuid::new_v4(), title: "The thing".into(), reason: "hook".into(), start: 500, end: 3000,
+            keep: vec![Range { start: 500, end: 1500 }, Range { start: 2000, end: 3000 }], fade_in: 0, fade_out: 200, notes: vec![],
+        };
+        let id = h.id;
+        p.highlights.push(h);
+        (cue, id)
+    }
+
+    #[tokio::test]
+    async fn captions_can_be_corrected_and_highlights_dismissed() {
+        let app = app();
+        let st = app.state::<AppState>();
+        media_import(st.clone(), fx("clip_a_720p.mp4")).await.unwrap();
+        let (cue, h) = with_captions(&st);
+        let p = cue_set_text(st.clone(), cue, "  So here's   the thing \n".into()).unwrap();
+        assert_eq!(p.transcripts[0].cues[0].text, "So here's the thing");
+        let p = cue_set_text(st.clone(), cue, "  ".into()).unwrap();
+        assert_eq!(p.transcripts[0].cues.len(), 1, "blank removes the caption");
+        assert!(matches!(cue_set_text(st.clone(), cue, "x".into()), Err(Error::ClipNotFound(_))));
+        let p = highlight_delete(st.clone(), h).unwrap();
+        assert!(p.highlights.is_empty());
+        assert!(matches!(highlight_delete(st.clone(), h), Err(Error::ClipNotFound(_))));
+        assert!(untranscribed(&project_get(st.clone())).is_empty(), "already has a transcript");
+        let p = media_import(st.clone(), fx("clip_b_1080p.mp4")).await.unwrap();
+        media_import(st.clone(), fx("clip_b_1080p.mp4")).await.unwrap();
+        media_import(st.clone(), fx("logo.png")).await.unwrap();
+        assert_eq!(untranscribed(&project_get(st)), vec![(p.clips[1].source.clone(), p.clips[1].media.duration_ms)], "once per source, no stills");
+    }
+
+    #[tokio::test]
+    async fn applying_a_highlight_writes_a_short_beside_a_saved_project() {
+        let app = app();
+        let st = app.state::<AppState>();
+        let dir = tempfile::tempdir().unwrap();
+        project_new(st.clone(), "Episode".into());
+        media_import(st.clone(), fx("clip_a_720p.mp4")).await.unwrap();
+        let (_, h) = with_captions(&st);
+        assert!(matches!(highlight_apply(st.clone(), h), Err(Error::InvalidEdit(m)) if m.contains("save this project first")));
+        let file = dir.path().join("Episode.forgevideo");
+        project_save(st.clone(), Some(file.clone())).unwrap();
+        let before = project_get(st.clone());
+
+        let short = highlight_apply(st.clone(), h).unwrap();
+        assert_eq!(short, dir.path().join("Episode - The thing.forgevideo"));
+        assert_eq!(project_get(st.clone()), before, "the open project is not changed");
+        assert_eq!(project_save(st.clone(), None).unwrap(), file, "and still saves to its own file");
+        let s = crate::project::persist::load(&short).unwrap();
+        assert_eq!(s.aspect, AspectPreset::Shorts9x16);
+        assert_eq!(s.clips.iter().map(|c| (c.source_start, c.source_end)).collect::<Vec<_>>(), vec![(500, 1500), (2000, 3000)]);
+        assert_eq!(s.clips[1].fade_out, 200);
+        assert_eq!(ai::captions::timeline_cues(&s).len(), 2);
+        assert!(s.highlights.is_empty());
+        assert_eq!(highlight_apply(st.clone(), h).unwrap(), dir.path().join("Episode - The thing 2.forgevideo"));
+        assert!(matches!(highlight_apply(st, Uuid::new_v4()), Err(Error::ClipNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn srt_is_written_beside_the_export_only_when_there_are_captions() {
+        let app = app();
+        let st = app.state::<AppState>();
+        media_import(st.clone(), fx("clip_a_720p.mp4")).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.mp4");
+        assert_eq!(write_srt(&dest, &[]), None);
+        with_captions(&st);
+        let cues = ai::captions::timeline_cues(&project_get(st));
+        assert_eq!(write_srt(&dest, &cues), Some(dir.path().join("out.srt")));
+        assert!(std::fs::read_to_string(dir.path().join("out.srt")).unwrap().starts_with("1\n00:00:00,000 --> 00:00:01,500\nSo here is the thing\n"));
+        assert_eq!(write_srt(&dir.path().join("missing/out.mp4"), &cues), None);
+        let j = serde_json::to_value(ai_status().await).unwrap();
+        assert!(j["model_path"].is_string());
     }
 
     #[test]

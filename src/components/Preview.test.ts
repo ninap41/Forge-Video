@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { audioClip, audioTrack, clip, media, overlay, project, resolveWith, stillMedia, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, clip, cue, media, overlay, project, resolveWith, stillMedia, type MockApi } from "../test/fixtures";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -178,6 +178,10 @@ describe("Preview", () => {
     expect(els.map((e) => e.getAttribute("src"))).toEqual(["asset://localhost/audio/one.m4a", "asset://localhost/audio/two.m4a"]);
     expect(els[0].volume).toBeCloseTo(0.4);
     expect(els[1].volume).toBe(0);
+    // the track fader scales the clip's own volume
+    store.project = { ...store.project!, audio_tracks: [audioTrack([a1], { id: "t1", volume: 0.5 }), audioTrack([a2], { id: "t2", muted: true })] };
+    await flush();
+    expect((w.findAll("[data-testid=audio-clip]")[0].element as HTMLAudioElement).volume).toBeCloseTo(0.2);
     store.playhead = 4500;
     await flush();
     expect(w.findAll("[data-testid=audio-clip]")).toHaveLength(0);
@@ -289,5 +293,25 @@ describe("Preview", () => {
     store.project = { ...store.project!, video_muted: true };
     await flush();
     expect(video.volume).toBe(0);
+    store.project = { ...store.project!, video_muted: false, video_volume: 0.5 };
+    await flush();
+    expect(video.volume).toBeCloseTo(0.4, 5);
+  });
+
+  it("shows the caption under the playhead, sized from the frame", async () => {
+    const p = project([clip({ id: "a", source: "/v/a.mp4" }), clip({ id: "b", source: "/v/b.mp4", source_end: 4000 })], {
+      transcripts: [{ source: "/v/b.mp4", cues: [cue(1000, 3000, "nobody tells you this")] }],
+    });
+    const { store, w } = await setup(p);
+    expect(w.find("[data-testid=caption]").exists()).toBe(false);
+    store.playhead = 5000 + 1500;
+    await w.vm.$nextTick();
+    const c = w.find("[data-testid=caption]");
+    expect(c.text()).toBe("nobody tells you this");
+    expect(parseFloat((c.element as HTMLElement).style.fontSize)).toBeCloseTo(450 * 0.045, 3);
+    expect(c.classes()).toContain("pointer-events-none");
+    store.playhead = 5000 + 3000;
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=caption]").exists()).toBe(false);
   });
 });

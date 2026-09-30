@@ -19,6 +19,7 @@ fn for_each_path(p: &mut Project, mut f: impl FnMut(&mut PathBuf)) {
     for o in &mut p.overlays { f(&mut o.source); }
     for t in &mut p.audio_tracks { for c in &mut t.clips { f(&mut c.source); } }
     for i in &mut p.pool { f(&mut i.path); }
+    for t in &mut p.transcripts { f(&mut t.source); }
     if let Some(m) = &mut p.music { f(&mut m.source); }
 }
 
@@ -98,6 +99,7 @@ mod more_tests {
         let mut st = media(); st.is_still = true;
         p.overlays.push(OverlayClip::new(logo.clone(), st));
         p.pool.push(PoolItem { id: uuid::Uuid::new_v4(), path: bed.clone(), media: media() });
+        p.transcripts.push(Transcript { source: bed.clone(), cues: Vec::new() });
         let file = dir.path().join("p.forgevideo");
         save(&p, &file).unwrap();
         let raw = std::fs::read_to_string(&file).unwrap();
@@ -107,6 +109,7 @@ mod more_tests {
         assert_eq!(l.audio_tracks[0].clips[0].source, bed);
         assert_eq!(l.overlays[0].source, logo);
         assert_eq!(l.pool[0].path, bed);
+        assert_eq!(l.transcripts[0].source, bed);
     }
 
     #[test]

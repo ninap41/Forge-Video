@@ -12,6 +12,7 @@ pub const PROJECT_FILE_VERSION: u32 = 2;
 pub const STILL_DEFAULT_MS: Ms = 5000;
 
 fn one() -> u32 { 1 }
+fn full() -> f32 { 1.0 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rational {
@@ -279,12 +280,15 @@ pub struct AudioTrack {
     pub id: Uuid,
     pub label: String,
     pub muted: bool,
+    /// Track fader, 0–1: multiplies every clip's own volume on export and in the preview.
+    #[serde(default = "full")]
+    pub volume: f32,
     pub clips: Vec<AudioClip>,
 }
 
 impl AudioTrack {
     pub fn new(label: impl Into<String>) -> Self {
-        AudioTrack { id: Uuid::new_v4(), label: label.into(), muted: false, clips: Vec::new() }
+        AudioTrack { id: Uuid::new_v4(), label: label.into(), muted: false, volume: 1.0, clips: Vec::new() }
     }
 }
 
@@ -294,6 +298,46 @@ pub struct PoolItem {
     pub id: Uuid,
     pub path: PathBuf,
     pub media: MediaInfo,
+}
+
+/// One caption line. Times are in *source* time, so timeline edits never desync captions;
+/// `ai::captions::timeline_cues` maps them through the V1 clips.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cue {
+    pub id: Uuid,
+    pub start: Ms,
+    pub end: Ms,
+    pub text: String,
+}
+
+/// What was said in one source file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Transcript {
+    pub source: PathBuf,
+    pub cues: Vec<Cue>,
+}
+
+/// A span of the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Range {
+    pub start: Ms,
+    pub end: Ms,
+}
+
+/// A section worth cutting into a short, with the plan to build it. Times are *timeline* time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Highlight {
+    pub id: Uuid,
+    pub title: String,
+    pub reason: String,
+    pub start: Ms,
+    pub end: Ms,
+    /// The parts of `start..end` that make the cut, in order. Never empty.
+    pub keep: Vec<Range>,
+    pub fade_in: Ms,
+    pub fade_out: Ms,
+    /// Suggestions the app cannot apply by itself. Display only.
+    pub notes: Vec<String>,
 }
 
 /// The pre-v2 single music bed. Only ever read, then migrated into an `AudioTrack`.
@@ -326,10 +370,17 @@ pub struct Project {
     /// Track-level mute for V1: every clip's audio is silenced on export and in the preview.
     #[serde(default)]
     pub video_muted: bool,
+    /// V1 track fader, 0–1, on top of each clip's volume.
+    #[serde(default = "full")]
+    pub video_volume: f32,
     #[serde(default)]
     pub audio_tracks: Vec<AudioTrack>,
     #[serde(default)]
     pub pool: Vec<PoolItem>,
+    #[serde(default)]
+    pub transcripts: Vec<Transcript>,
+    #[serde(default)]
+    pub highlights: Vec<Highlight>,
     /// v1 files only; `migrate` folds it into `audio_tracks` and clears it. Never written.
     #[serde(default, skip_serializing)]
     pub music: Option<LegacyMusic>,
@@ -349,8 +400,11 @@ impl Project {
             overlays: Vec::new(),
             overlay_layers: 1,
             video_muted: false,
+            video_volume: 1.0,
             audio_tracks: Vec::new(),
             pool: Vec::new(),
+            transcripts: Vec::new(),
+            highlights: Vec::new(),
             music: None,
             fps: None,
         }
@@ -566,8 +620,10 @@ mod tests {
             "crop":{"scale":1.0,"x":0.5,"y":0.5},"clips":[],"music":null,"fps":null}"#;
         let p: Project = serde_json::from_str(j).unwrap();
         assert!(p.overlays.is_empty() && p.audio_tracks.is_empty() && p.pool.is_empty());
+        assert!(p.transcripts.is_empty() && p.highlights.is_empty());
         assert_eq!(p.overlay_layers, 1);
         assert!(!p.video_muted);
+        assert_eq!(p.video_volume, 1.0);
     }
 
     #[test]
@@ -621,6 +677,11 @@ mod tests {
         p.overlays.push(OverlayClip::new(PathBuf::from("/l.png"), st));
         p.pool.push(PoolItem { id: Uuid::new_v4(), path: PathBuf::from("/a.mp4"), media: media() });
         p.crop = Crop { scale: 1.5, x: 0.2, y: 0.8 };
+        p.transcripts.push(Transcript { source: PathBuf::from("/a.mp4"), cues: vec![Cue { id: Uuid::new_v4(), start: 0, end: 900, text: "hello".into() }] });
+        p.highlights.push(Highlight {
+            id: Uuid::new_v4(), title: "Hook".into(), reason: "r".into(), start: 0, end: 3000,
+            keep: vec![Range { start: 0, end: 3000 }], fade_in: 0, fade_out: 500, notes: vec!["n".into()],
+        });
         let json = serde_json::to_string(&p).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);

@@ -7,7 +7,7 @@ import { api } from "../api/tauri";
 import { drawPeaks } from "../utils/waveform";
 
 const props = defineProps<{ clip: Clip; pxPerMs: number; selected: boolean; thumbs?: Thumbs; peaks?: number[]; index: number }>();
-const emit = defineEmits<{ select: []; trimStart: [e: PointerEvent]; trimEnd: [e: PointerEvent]; dragStart: [e: PointerEvent]; contextMenu: [e: MouseEvent] }>();
+const emit = defineEmits<{ select: [extend: boolean]; trimStart: [e: PointerEvent]; trimEnd: [e: PointerEvent]; dragStart: [e: PointerEvent]; contextMenu: [e: MouseEvent] }>();
 
 const width = computed(() => clipDuration(props.clip) * props.pxPerMs);
 const trans = computed(() => transitionMs(props.clip.transition_out) * props.pxPerMs);
@@ -40,7 +40,7 @@ watch(() => [width.value, props.peaks, props.clip.source_start, props.clip.sourc
     class="absolute top-0 h-full rounded-md overflow-hidden border select-none group"
     :class="selected ? 'border-accent ring-2 ring-accent/40 z-10' : 'border-line hover:border-muted'"
     :style="{ left: clip.timeline_start * pxPerMs + 'px', width: width + 'px', background: '#2a2a30' }"
-    @pointerdown.stop="emit('select'); emit('dragStart', $event)" @contextmenu.prevent.stop="emit('select'); emit('contextMenu', $event)"
+    @pointerdown.stop="emit('select', $event.shiftKey); emit('dragStart', $event)" @contextmenu.prevent.stop="selected || emit('select', $event.shiftKey); emit('contextMenu', $event)"
   >
     <div class="absolute inset-x-0 top-0 h-[54px] overflow-hidden bg-black/40" :style="still ? { backgroundImage: `url(${stillUrl})`, backgroundSize: 'auto 100%', backgroundRepeat: 'repeat-x', backgroundPosition: 'left center' } : {}">
       <img v-for="t in visibleThumbs" :key="t.left" :src="t.url" class="absolute top-0 h-full object-cover pointer-events-none" :style="{ left: t.left + 'px', width: t.w + 'px' }" draggable="false" />
@@ -54,7 +54,7 @@ watch(() => [width.value, props.peaks, props.clip.source_start, props.clip.sourc
     <div v-if="trans > 0" class="absolute right-0 top-0 h-full bg-accent-2/40 border-l border-accent-2 pointer-events-none flex items-end justify-center text-[9px] text-white/80" :style="{ width: trans + 'px' }">
       {{ clip.transition_out.type === 'CrossDissolve' ? '⨯' : '■' }}
     </div>
-    <div class="absolute left-0 top-0 h-full w-2 cursor-ew-resize bg-accent/0 group-hover:bg-accent/60" @pointerdown.stop="emit('select'); emit('trimStart', $event)" />
-    <div class="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-accent/0 group-hover:bg-accent/60" @pointerdown.stop="emit('select'); emit('trimEnd', $event)" />
+    <div class="absolute left-0 top-0 h-full w-2 cursor-ew-resize bg-accent/0 group-hover:bg-accent/60" @pointerdown.stop="emit('select', false); emit('trimStart', $event)" />
+    <div class="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-accent/0 group-hover:bg-accent/60" @pointerdown.stop="emit('select', false); emit('trimEnd', $event)" />
   </div>
 </template>

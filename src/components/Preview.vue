@@ -165,7 +165,7 @@ function syncSeek() {
   if (v && !curStill.value) {
     const t = c.sourceMs / 1000;
     if (Math.abs(v.currentTime - t) > 0.03) v.currentTime = t;
-    v.volume = c.clip.muted || store.project?.video_muted ? 0 : clamp(c.clip.volume, 0, 1);
+    v.volume = c.clip.muted || store.project?.video_muted ? 0 : clamp(c.clip.volume * (store.project?.video_volume ?? 1), 0, 1);
   }
   syncOverlay();
   syncAudio();
@@ -183,9 +183,9 @@ function syncOverlay() {
 }
 /** One <audio> per audio clip under the playhead; elements come and go with the playhead. */
 function syncAudio() {
-  for (const { clip, sourceMs, silent } of store.activeAudioClips) {
+  for (const { clip, track, sourceMs, silent } of store.activeAudioClips) {
     const a = audioEls.value[clip.id]; if (!a) continue;
-    a.volume = silent ? 0 : clamp(clip.volume, 0, 1);
+    a.volume = silent ? 0 : clamp(clip.volume * track.volume, 0, 1);
     const t = sourceMs / 1000;
     if (Math.abs(a.currentTime - t) > 0.08) a.currentTime = t;
     if (store.playing && a.paused) void a.play().catch(() => {});
@@ -278,9 +278,9 @@ function onMediaError(source: string) {
   store.notify(`Preview can't play ${basename(source)} here — export still works`, 5000);
 }
 // New audio elements (playhead entered a clip) and volume/mute edits need a nudge.
-watch(() => store.activeAudioClips.map((a) => `${a.clip.id}:${a.clip.volume}:${a.silent}`).join(","), () => { void Promise.resolve().then(syncAudio); });
+watch(() => store.activeAudioClips.map((a) => `${a.clip.id}:${a.clip.volume}:${a.track.volume}:${a.silent}`).join(","), () => { void Promise.resolve().then(syncAudio); });
 watch(() => ovs.value.map((o) => o.clip.id).join(","), () => { void Promise.resolve().then(syncOverlay); });
-watch(() => store.project?.video_muted, syncSeek);
+watch(() => [store.project?.video_muted, store.project?.video_volume], syncSeek);
 
 const ro = new ResizeObserver(([e]) => { stageSize.value = { w: e.contentRect.width, h: e.contentRect.height }; });
 watch(stage, (s, old) => { if (old) ro.unobserve(old); if (s) ro.observe(s); });
@@ -310,6 +310,10 @@ onBeforeUnmount(() => { ro.disconnect(); cancelAnimationFrame(raf); });
           :class="ov?.clip.id === o.clip.id ? 'outline outline-1 outline-accent' : ''" :style="overlayStyle(o)" playsinline preload="auto" muted data-testid="overlay-layer" @loadedmetadata="syncOverlay" @error="onMediaError(o.clip.source)"
         />
       </template>
+      <div
+        v-if="store.currentCue" data-testid="caption" class="absolute inset-x-0 bottom-[12%] px-[6%] text-center font-semibold leading-snug pointer-events-none"
+        :style="{ fontSize: Math.max(10, frameSize.h * 0.045) + 'px' }"
+      ><span class="bg-black/65 text-white rounded px-[0.4em] py-[0.1em] [box-decoration-break:clone] [-webkit-box-decoration-break:clone]">{{ store.currentCue.text }}</span></div>
       <div class="absolute bottom-1 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 rounded">
         {{ preset.label }} {{ preset.sub }} · {{ ovSelected ? 'drag to place overlay · scroll to resize' : 'drag to reposition · scroll to zoom' }}
       </div>

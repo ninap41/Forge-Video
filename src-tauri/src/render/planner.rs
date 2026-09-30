@@ -75,7 +75,7 @@ pub fn stream_copy_blockers(p: &Project) -> Vec<String> {
     if !p.crop.is_identity() { r.push("crop / reposition".into()); }
     if !source_matches_preset(p, p.aspect) { r.push("aspect ratio change".into()); }
     if c.codec_is_copyable() == false { r.push(format!("source codec {}", c.media.codec)); }
-    if c.muted || p.video_muted || (c.volume - 1.0).abs() > 1e-3 { r.push("volume change".into()); }
+    if c.muted || p.video_muted || (c.volume - 1.0).abs() > 1e-3 || (p.video_volume - 1.0).abs() > 1e-3 { r.push("volume change".into()); }
     if c.media.has_audio && c.media.audio_codec.as_deref() != Some("aac") { r.push("audio codec".into()); }
     r
 }
@@ -281,6 +281,9 @@ mod more_tests {
         assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
         let mut p2 = p.clone();
         p2.video_muted = true;
+        assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
+        let mut p2 = p.clone();
+        p2.video_volume = 0.7;
         assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
 
         let mut p2 = p.clone();

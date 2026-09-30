@@ -173,4 +173,19 @@ describe("ExportDialog", () => {
     await w.find(".fixed").trigger("pointerdown");
     expect(w.emitted("close")).toHaveLength(1);
   });
+
+  it("names the captions file written beside the export and ignores AI job results", async () => {
+    const { w } = setup();
+    await flush();
+    saveDialog.mockResolvedValueOnce("/out/reel.mp4");
+    await btn(w, "Export").trigger("click");
+    await flush();
+    doneCb({ job_id: "job-1", kind: "transcribe", result: { project: project([]) } });
+    await flush();
+    expect(w.text()).not.toContain("Done in");
+    doneCb({ job_id: "job-1", kind: "export", result: { destination: "/out/reel.mp4", strategy: "HardwareEncode", captions: "/out/reel.srt" } });
+    await flush();
+    expect(w.text()).toContain("Done in");
+    expect(w.text()).toContain("Captions: reel.srt");
+  });
 });

@@ -191,7 +191,7 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
         <span class="text-muted">{{ a.muted ? 'Clip muted' : 'Clip audio on' }}</span>
       </div>
       <div class="flex items-center gap-2 mt-1">
-        <MuteToggle :muted="au.track.muted" label="track" @toggle="store.audioTrackUpdate(au.track.id, au.track.label, !au.track.muted)" />
+        <MuteToggle :muted="au.track.muted" label="track" @toggle="store.audioTrackUpdate(au.track.id, au.track.label, !au.track.muted, au.track.volume)" />
         <span class="text-muted">Track “{{ au.track.label }}” {{ au.track.muted ? 'muted' : 'on' }}</span>
       </div>
       <div class="text-muted/70 mt-1">Audio is trimmed to the video length on export.</div>

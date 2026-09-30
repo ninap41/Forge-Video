@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod cache;
 pub mod capture;
 pub mod commands;
@@ -34,6 +35,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::project_get,
@@ -43,9 +45,11 @@ pub fn run() {
             commands::project_set_aspect,
             commands::project_set_crop,
             commands::project_set_video_muted,
+            commands::project_set_video_volume,
             commands::media_import,
             commands::clip_trim,
             commands::clip_split,
+            commands::clip_merge,
             commands::clip_delete,
             commands::clip_move,
             commands::clip_set_fades,
@@ -80,6 +84,15 @@ pub fn run() {
             commands::export_start,
             commands::job_cancel,
             commands::ffmpeg_status,
+            commands::ai_status,
+            commands::ai_claude_login,
+            commands::ai_install,
+            commands::ai_claude_logout,
+            commands::ai_transcribe,
+            commands::ai_find_highlights,
+            commands::cue_set_text,
+            commands::highlight_delete,
+            commands::highlight_apply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ForgeVideo");

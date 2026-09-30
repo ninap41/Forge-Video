@@ -11,7 +11,7 @@ const props = defineProps<{
   clip: OverlayClip | AudioClip; kind: "overlay" | "audio"; pxPerMs: number; selected: boolean;
   thumbs?: Thumbs; peaks?: number[]; dimmed?: boolean;
 }>();
-const emit = defineEmits<{ select: []; trimStart: [e: PointerEvent]; trimEnd: [e: PointerEvent]; dragStart: [e: PointerEvent]; contextMenu: [e: MouseEvent] }>();
+const emit = defineEmits<{ select: [extend: boolean]; trimStart: [e: PointerEvent]; trimEnd: [e: PointerEvent]; dragStart: [e: PointerEvent]; contextMenu: [e: MouseEvent] }>();
 
 const width = computed(() => clipDuration(props.clip) * props.pxPerMs);
 const still = computed(() => props.clip.media.is_still);
@@ -46,7 +46,7 @@ watch(() => [width.value, props.peaks, props.clip.source_start, props.clip.sourc
       kind === 'audio' ? 'bg-accent-2/15' : 'bg-panel-2']"
     :style="{ left: clip.timeline_start * pxPerMs + 'px', width: width + 'px' }"
     :data-clip-id="clip.id"
-    @pointerdown.stop="emit('select'); emit('dragStart', $event)" @contextmenu.prevent.stop="emit('select'); emit('contextMenu', $event)"
+    @pointerdown.stop="emit('select', $event.shiftKey); emit('dragStart', $event)" @contextmenu.prevent.stop="selected || emit('select', $event.shiftKey); emit('contextMenu', $event)"
   >
     <template v-if="kind === 'overlay'">
       <div v-if="still" class="absolute inset-0 bg-black/40" :style="{ backgroundImage: `url(${stillUrl})`, backgroundSize: 'auto 100%', backgroundRepeat: 'repeat-x', backgroundPosition: 'left center' }" />
@@ -60,7 +60,7 @@ watch(() => [width.value, props.peaks, props.clip.source_start, props.clip.sourc
     </div>
     <div v-if="clip.fade_in" class="absolute left-0 top-0 h-full bg-gradient-to-r from-black/80 to-transparent pointer-events-none" :style="{ width: clip.fade_in * pxPerMs + 'px' }" />
     <div v-if="clip.fade_out" class="absolute right-0 top-0 h-full bg-gradient-to-l from-black/80 to-transparent pointer-events-none" :style="{ width: clip.fade_out * pxPerMs + 'px' }" />
-    <div class="absolute left-0 top-0 h-full w-2 cursor-ew-resize bg-accent/0 group-hover:bg-accent/60" @pointerdown.stop="emit('select'); emit('trimStart', $event)" />
-    <div class="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-accent/0 group-hover:bg-accent/60" @pointerdown.stop="emit('select'); emit('trimEnd', $event)" />
+    <div class="absolute left-0 top-0 h-full w-2 cursor-ew-resize bg-accent/0 group-hover:bg-accent/60" @pointerdown.stop="emit('select', false); emit('trimStart', $event)" />
+    <div class="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-accent/0 group-hover:bg-accent/60" @pointerdown.stop="emit('select', false); emit('trimEnd', $event)" />
   </div>
 </template>

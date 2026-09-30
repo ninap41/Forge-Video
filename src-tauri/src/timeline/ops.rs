@@ -61,8 +61,10 @@ pub fn relayout(p: &mut Project) {
     let needed = p.overlays.iter().map(|o| o.layer + 1).max().unwrap_or(1);
     p.overlay_layers = p.overlay_layers.max(needed).max(1);
 
+    p.video_volume = if p.video_volume.is_finite() { p.video_volume.clamp(0.0, 1.0) } else { 1.0 };
     // Audio tracks: same rules per track.
     for t in &mut p.audio_tracks {
+        t.volume = if t.volume.is_finite() { t.volume.clamp(0.0, 1.0) } else { 1.0 };
         for c in &mut t.clips {
             c.source_end = c.source_end.min(c.media.duration_ms);
             if c.source_end < c.source_start + MIN_CLIP_MS {
@@ -80,6 +82,19 @@ pub fn relayout(p: &mut Project) {
             end = c.end_ms();
         }
     }
+
+    // Highlights: suggestions that no longer fit on the timeline are dropped.
+    let total = p.duration_ms();
+    for h in &mut p.highlights {
+        h.end = h.end.min(total);
+        let (s, e) = (h.start, h.end);
+        for r in &mut h.keep {
+            r.start = r.start.clamp(s, e.max(s));
+            r.end = r.end.clamp(s, e.max(s));
+        }
+        h.keep.retain(|r| r.start + MIN_CLIP_MS <= r.end);
+    }
+    p.highlights.retain(|h| h.start + MIN_CLIP_MS <= h.end && !h.keep.is_empty());
 }
 
 fn idx(p: &Project, id: Uuid) -> Result<usize> {
@@ -122,6 +137,108 @@ pub fn split(p: &mut Project, id: Uuid, at_timeline_ms: Ms) -> Result<Uuid> {
     p.clips.insert(i + 1, right);
     relayout(p);
     Ok(new_id)
+}
+
+/// Sorted, de-duplicated positions of `ids` within a row, which must sit side by side.
+fn run_of(ids: &[Uuid], find: impl Fn(Uuid) -> Option<usize>) -> Result<Vec<usize>> {
+    if ids.len() < 2 {
+        return Err(Error::InvalidEdit("select two or more neighbouring clips to merge".into()));
+    }
+    let mut ix = ids.iter().map(|id| find(*id).ok_or(Error::ClipNotFound(*id))).collect::<Result<Vec<_>>>()?;
+    ix.sort_unstable();
+    ix.dedup();
+    if ix.len() < 2 || ix.windows(2).any(|w| w[1] != w[0] + 1) {
+        return Err(Error::InvalidEdit("only neighbouring clips can be merged".into()));
+    }
+    Ok(ix)
+}
+
+/// Two pieces join when they come from the same file and the right one continues where the left
+/// stopped (stills have no source time, so only the file has to match).
+fn joinable(a_source: &std::path::Path, a_source_end: Ms, still: bool, b_source: &std::path::Path, b_source_start: Ms) -> Result<()> {
+    if a_source != b_source {
+        return Err(Error::InvalidEdit("only pieces of the same file can be merged".into()));
+    }
+    if !still && a_source_end != b_source_start {
+        return Err(Error::InvalidEdit("these clips are not consecutive pieces of the file".into()));
+    }
+    Ok(())
+}
+
+/// Undo a split: join neighbouring pieces of one file back into a single clip. The first piece
+/// keeps its id, name and fade-in; the last one supplies the fade-out (and, on V1, the transition).
+/// Works on V1, one overlay layer or one audio track; free clips must also touch on the timeline.
+pub fn merge(p: &mut Project, ids: &[Uuid]) -> Result<Uuid> {
+    if ids.iter().all(|id| p.clip_index(*id).is_some()) {
+        let ix = run_of(ids, |id| p.clip_index(id))?;
+        for w in ix.windows(2) {
+            let (a, b) = (&p.clips[w[0]], &p.clips[w[1]]);
+            joinable(&a.source, a.source_end, a.media.is_still, &b.source, b.source_start)?;
+        }
+        let total: Ms = ix.iter().map(|i| p.clips[*i].duration_ms()).sum();
+        let last = p.clips[*ix.last().unwrap()].clone();
+        let first = &mut p.clips[ix[0]];
+        first.source_end = first.source_start + total;
+        first.fade_out = last.fade_out;
+        first.transition_out = last.transition_out;
+        let id = first.id;
+        for i in ix[1..].iter().rev() {
+            p.clips.remove(*i);
+        }
+        relayout(p);
+        return Ok(id);
+    }
+    if ids.iter().all(|id| p.overlay_index(*id).is_some()) {
+        let layer = p.overlays[p.overlay_index(ids[0]).unwrap()].layer;
+        if ids.iter().any(|id| p.overlays[p.overlay_index(*id).unwrap()].layer != layer) {
+            return Err(Error::InvalidEdit("only neighbouring clips can be merged".into()));
+        }
+        let mut row: Vec<usize> = (0..p.overlays.len()).filter(|i| p.overlays[*i].layer == layer).collect();
+        row.sort_by_key(|i| p.overlays[*i].timeline_start);
+        let ix = run_of(ids, |id| row.iter().position(|i| p.overlays[*i].id == id))?;
+        let ix: Vec<usize> = ix.into_iter().map(|k| row[k]).collect();
+        for w in ix.windows(2) {
+            let (a, b) = (&p.overlays[w[0]], &p.overlays[w[1]]);
+            joinable(&a.source, a.source_end, a.media.is_still, &b.source, b.source_start)?;
+            if a.timeline_start + a.duration_ms() != b.timeline_start {
+                return Err(Error::InvalidEdit("these clips do not touch on the timeline".into()));
+            }
+        }
+        let total: Ms = ix.iter().map(|i| p.overlays[*i].duration_ms()).sum();
+        let last = p.overlays[*ix.last().unwrap()].clone();
+        let first = &mut p.overlays[ix[0]];
+        first.source_end = first.source_start + total;
+        first.fade_out = last.fade_out;
+        let id = first.id;
+        let mut drop: Vec<usize> = ix[1..].to_vec();
+        drop.sort_unstable();
+        for i in drop.iter().rev() {
+            p.overlays.remove(*i);
+        }
+        relayout(p);
+        return Ok(id);
+    }
+    let (ti, _) = aidx(p, ids[0])?;
+    let ix = run_of(ids, |id| p.audio_tracks[ti].clips.iter().position(|c| c.id == id))?;
+    let clips = &p.audio_tracks[ti].clips;
+    for w in ix.windows(2) {
+        let (a, b) = (&clips[w[0]], &clips[w[1]]);
+        joinable(&a.source, a.source_end, false, &b.source, b.source_start)?;
+        if a.end_ms() != b.timeline_start {
+            return Err(Error::InvalidEdit("these clips do not touch on the timeline".into()));
+        }
+    }
+    let total: Ms = ix.iter().map(|i| clips[*i].duration_ms()).sum();
+    let last = clips[*ix.last().unwrap()].clone();
+    let first = &mut p.audio_tracks[ti].clips[ix[0]];
+    first.source_end = first.source_start + total;
+    first.fade_out = last.fade_out;
+    let id = first.id;
+    for i in ix[1..].iter().rev() {
+        p.audio_tracks[ti].clips.remove(*i);
+    }
+    relayout(p);
+    Ok(id)
 }
 
 pub fn delete(p: &mut Project, id: Uuid) -> Result<()> {
@@ -354,12 +471,13 @@ pub fn audio_track_add(p: &mut Project, label: &str) -> Uuid {
     id
 }
 
-pub fn audio_track_update(p: &mut Project, id: Uuid, label: &str, muted: bool) -> Result<()> {
+pub fn audio_track_update(p: &mut Project, id: Uuid, label: &str, muted: bool, volume: f32) -> Result<()> {
     let i = tidx(p, id)?;
     if !label.trim().is_empty() {
         p.audio_tracks[i].label = label.trim().to_string();
     }
     p.audio_tracks[i].muted = muted;
+    p.audio_tracks[i].volume = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 };
     Ok(())
 }
 
@@ -482,6 +600,39 @@ mod track_tests {
     fn png() -> MediaInfo { let mut m = vid(STILL_DEFAULT_MS); m.is_still = true; m.has_audio = false; m }
 
     #[test]
+    fn merge_joins_split_overlays_and_audio_clips_that_touch() {
+        let mut p = Project::new("m");
+        append(&mut p, Clip::new(PathBuf::from("/v.mp4"), vid(20_000)));
+        // a still overlay: halves have no source continuity, only length
+        let logo = overlay_add(&mut p, OverlayClip::new(PathBuf::from("/logo.png"), png()), 1000, 0);
+        overlay_set_fades(&mut p, logo, 200, 300).unwrap();
+        let before = p.clone();
+        let right = overlay_split(&mut p, logo, 3000).unwrap();
+        assert_eq!(merge(&mut p, &[right, logo]).unwrap(), logo);
+        assert_eq!(p, before);
+        // a video overlay whose halves drifted apart no longer merges
+        let b = overlay_add(&mut p, OverlayClip::new(PathBuf::from("/b.mp4"), vid(8000)), 7000, 0);
+        let br = overlay_split(&mut p, b, 9000).unwrap();
+        overlay_move(&mut p, br, 12_000, 0).unwrap();
+        assert!(matches!(merge(&mut p, &[b, br]), Err(Error::InvalidEdit(m)) if m.contains("touch")));
+        // pieces on different layers are not neighbours
+        let c = overlay_add(&mut p, OverlayClip::new(PathBuf::from("/b.mp4"), vid(8000)), 0, 1);
+        assert!(matches!(merge(&mut p, &[b, c]), Err(Error::InvalidEdit(m)) if m.contains("neighbouring")));
+
+        let t = audio_track_add(&mut p, "Music");
+        let m = audio_clip_add(&mut p, t, AudioClip::new("/m.m4a".into(), aud(9000)), 500).unwrap();
+        audio_clip_set(&mut p, m, 0.5, 100, 200, false).unwrap();
+        let before = p.clone();
+        let m2 = audio_clip_split(&mut p, m, 3000).unwrap();
+        let m3 = audio_clip_split(&mut p, m2, 6000).unwrap();
+        assert_eq!(merge(&mut p, &[m3, m, m2]).unwrap(), m);
+        assert_eq!(p, before);
+        let m2 = audio_clip_split(&mut p, m, 3000).unwrap();
+        audio_clip_move(&mut p, m2, t, 5000).unwrap();
+        assert!(matches!(merge(&mut p, &[m, m2]), Err(Error::InvalidEdit(m)) if m.contains("touch")));
+    }
+
+    #[test]
     fn overlays_sort_and_push_apart() {
         let mut p = Project::new("o");
         let a = overlay_add(&mut p, OverlayClip::new("/a.mp4".into(), vid(4000)), 3000, 0);
@@ -566,8 +717,16 @@ mod track_tests {
         let music = audio_track_add(&mut p, "Music");
         let sfx = audio_track_add(&mut p, "   ");
         assert_eq!(p.audio_tracks[1].label, "Audio");
-        audio_track_update(&mut p, sfx, "SFX", true).unwrap();
+        audio_track_update(&mut p, sfx, "SFX", true, 1.0).unwrap();
         assert_eq!((p.audio_tracks[1].label.as_str(), p.audio_tracks[1].muted), ("SFX", true));
+        audio_track_update(&mut p, sfx, "SFX", true, 3.0).unwrap();
+        assert_eq!(p.audio_tracks[1].volume, 1.0, "fader tops out at 1");
+        audio_track_update(&mut p, sfx, "SFX", true, 0.3).unwrap();
+        assert_eq!(p.audio_tracks[1].volume, 0.3);
+        p.audio_tracks[1].volume = f32::NAN;
+        p.video_volume = -2.0;
+        relayout(&mut p);
+        assert_eq!((p.audio_tracks[1].volume, p.video_volume), (1.0, 0.0), "relayout repairs faders");
         let a = audio_clip_add(&mut p, music, AudioClip::new("/m.m4a".into(), aud(9000)), 2000).unwrap();
         let b = audio_clip_add(&mut p, music, AudioClip::new("/n.m4a".into(), aud(1000)), 2500).unwrap();
         // the dropped clip wins its spot; the 9 s clip it landed on is pushed after it
@@ -814,6 +973,51 @@ mod edge_tests {
         assert_eq!(r.transition_out, Transition::DipToBlack { ms: 400 });
         assert_eq!((r.volume, r.muted), (0.3, true), "audio settings are inherited");
         assert_eq!(r.source, l.source);
+    }
+
+    #[test]
+    fn merge_undoes_a_split_and_restores_fades_and_transition() {
+        let mut p = proj(&[6000, 5000]);
+        let a = p.clips[0].id;
+        set_fades(&mut p, a, 500, 700).unwrap();
+        set_transition(&mut p, a, Transition::DipToBlack { ms: 400 }).unwrap();
+        rename(&mut p, a, "Intro").unwrap();
+        let before = p.clone();
+        let r1 = split(&mut p, a, 2000).unwrap();
+        let r2 = split(&mut p, r1, 4000).unwrap();
+        assert_eq!(p.clips.len(), 4);
+        // order of ids does not matter; duplicates are fine
+        let kept = merge(&mut p, &[r2, a, r1, a]).unwrap();
+        assert_eq!(kept, a);
+        assert_eq!(p, before, "a full merge is the exact inverse of the splits");
+        // merging only the two right-hand pieces leaves the left one alone
+        let r1 = split(&mut p, a, 2000).unwrap();
+        let r2 = split(&mut p, r1, 4000).unwrap();
+        assert_eq!(merge(&mut p, &[r1, r2]).unwrap(), r1);
+        assert_eq!(p.clips.len(), 3);
+        assert_eq!((p.clips[1].source_start, p.clips[1].source_end, p.clips[1].fade_out), (2000, 6000, 700));
+        assert_eq!(p.clips[1].transition_out, Transition::DipToBlack { ms: 400 });
+        assert_eq!(p.clips[1].name.as_deref(), Some("Intro"));
+        assert_eq!(p.duration_ms(), 10_600, "11 s minus the 400 ms dip overlap");
+    }
+
+    #[test]
+    fn merge_refuses_what_is_not_a_split() {
+        let mut p = proj(&[5000, 4000, 3000]);
+        let (a, b, c) = (p.clips[0].id, p.clips[1].id, p.clips[2].id);
+        assert!(matches!(merge(&mut p, &[a]), Err(Error::InvalidEdit(m)) if m.contains("two or more")));
+        assert!(matches!(merge(&mut p, &[a, a]), Err(Error::InvalidEdit(m)) if m.contains("neighbouring")));
+        assert!(matches!(merge(&mut p, &[a, b]), Err(Error::InvalidEdit(m)) if m.contains("same file")));
+        assert!(matches!(merge(&mut p, &[a, Uuid::new_v4()]), Err(Error::ClipNotFound(_))));
+        // same file, but not consecutive pieces
+        let r = split(&mut p, a, 2500).unwrap();
+        move_to(&mut p, r, 2).unwrap(); // a, b, r
+        assert!(matches!(merge(&mut p, &[a, r]), Err(Error::InvalidEdit(m)) if m.contains("neighbouring")));
+        move_to(&mut p, b, 0).unwrap(); // b, a, r
+        trim(&mut p, r, 3000, 5000).unwrap();
+        assert!(matches!(merge(&mut p, &[a, r]), Err(Error::InvalidEdit(m)) if m.contains("not consecutive")));
+        assert!(matches!(merge(&mut p, &[a, c]), Err(Error::InvalidEdit(m)) if m.contains("neighbouring")));
+        assert_eq!(p.clips.len(), 4, "a refused merge changes nothing");
     }
 
     #[test]

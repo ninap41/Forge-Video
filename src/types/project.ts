@@ -98,11 +98,32 @@ export interface AudioTrack {
   id: string;
   label: string;
   muted: boolean;
+  /** Track fader 0–1. */
+  volume: number;
   clips: AudioClip[];
 }
 export const TRACK_LABEL_PRESETS = ["Music", "SFX", "Narration", "Other"] as const;
 
 export interface PoolItem { id: string; path: string; media: MediaInfo }
+
+/** One caption line, in *source* time. `timelineCues` maps them through the V1 clips. */
+export interface Cue { id: string; start: Ms; end: Ms; text: string }
+export interface Transcript { source: string; cues: Cue[] }
+export interface Range { start: Ms; end: Ms }
+/** A section worth cutting into a short, with the plan to build it. Timeline time. */
+export interface Highlight {
+  id: string;
+  title: string;
+  reason: string;
+  start: Ms;
+  end: Ms;
+  /** The parts of start..end that make the cut, in order. */
+  keep: Range[];
+  fade_in: Ms;
+  fade_out: Ms;
+  /** Suggestions the app cannot apply by itself. */
+  notes: string[];
+}
 
 export interface Project {
   version: number;
@@ -116,8 +137,12 @@ export interface Project {
   overlay_layers: number;
   /** Track-level mute for V1. */
   video_muted: boolean;
+  /** V1 fader 0–1, multiplied into each clip's volume. */
+  video_volume: number;
   audio_tracks: AudioTrack[];
   pool: PoolItem[];
+  transcripts: Transcript[];
+  highlights: Highlight[];
   fps: Rational | null;
 }
 
@@ -136,8 +161,13 @@ export interface ExportPlan {
 }
 
 export interface JobProgress { job_id: string; kind: string; progress: number; message: string | null }
-export interface JobDone { job_id: string; kind: string; result: { destination: string; strategy: Strategy } }
+export interface ExportResult { destination: string; strategy: Strategy; captions?: string | null }
+/** Export jobs finish with a file; AI jobs (`transcribe`, `highlights`) with the updated project. */
+export interface JobDone { job_id: string; kind: string; result: ExportResult | { project: Project } }
 export interface JobError { job_id: string; kind: string; error: string }
+
+/** `account` is the signed-in Claude email (null until Sign in completes). */
+export interface AiStatus { whisper: string | null; model: string | null; model_path: string; claude: string | null; account: string | null }
 
 /** Works for V1, overlay and audio clips alike. */
 export const clipDuration = (c: { source_start: Ms; source_end: Ms }): Ms => c.source_end - c.source_start;

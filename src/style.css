@@ -31,4 +31,7 @@ html, body, #app { height: 100%; margin: 0; background: var(--color-bg); color: 
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif; font-size: 13px;
   user-select: none; -webkit-user-select: none; overflow: hidden; }
 input[type=range] { accent-color: var(--color-accent); }
+/* Gutter faders: short, thin, and they never steal the row height. */
+.fader { height: 10px; width: 100%; cursor: ew-resize; }
+
 button:disabled { opacity: .4; cursor: default; }

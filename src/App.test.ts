@@ -347,3 +347,43 @@ describe("help dialog", () => {
     expect(w.find("[role=dialog]").exists()).toBe(false);
   });
 });
+
+describe("AI mode", () => {
+  it("the toolbar button swaps the inspector for the AI panel and back", async () => {
+    const { w } = await setup();
+    const toggle = w.find("[data-testid=ai-toggle]");
+    expect(toggle.attributes("aria-pressed")).toBe("false");
+    expect(w.find("[data-testid=ai-panel]").exists()).toBe(false);
+    expect(api.aiStatus).not.toHaveBeenCalled();
+    await toggle.trigger("click");
+    await flush();
+    expect(toggle.attributes("aria-pressed")).toBe("true");
+    expect(w.find("[data-testid=ai-panel]").exists()).toBe(true);
+    expect(w.text()).not.toContain("Output");
+    expect(api.aiStatus).toHaveBeenCalledTimes(1);
+    await toggle.trigger("click");
+    expect(w.find("[data-testid=ai-panel]").exists()).toBe(false);
+    expect(w.text()).toContain("Output");
+  });
+
+  it("opening a created short asks before discarding unsaved changes", async () => {
+    const { w, store } = await setup();
+    store.project = { ...base, highlights: [{ id: "h1", title: "Hook", reason: "", start: 0, end: 4000, keep: [{ start: 0, end: 4000 }], fade_in: 0, fade_out: 0, notes: [] }] };
+    await w.find("[data-testid=ai-toggle]").trigger("click");
+    await flush();
+    await btn(w, "Create short").trigger("click");
+    await flush();
+    api.projectOpen.mockClear();
+    store.dirty = true;
+    dialog.ask.mockResolvedValueOnce(false);
+    await btn(w, "Open").trigger("click");
+    await flush();
+    expect(dialog.ask).toHaveBeenCalled();
+    expect(api.projectOpen).not.toHaveBeenCalled();
+    dialog.ask.mockResolvedValueOnce(true);
+    await w.findAll("[data-testid=ai-panel] button").find((b) => b.text() === "Open")!.trigger("click");
+    await flush();
+    expect(api.projectOpen).toHaveBeenCalledWith("/videos/Test - The hook.forgevideo");
+    expect(store.dirty).toBe(false);
+  });
+});

@@ -147,6 +147,33 @@ describe("derived state", () => {
     s.select(null);
     expect(s.selectedClip).toBeNull();
   });
+
+  it("⇧-select extends within a row, toggles, and Merge joins the pieces and selects the result", async () => {
+    const s = useProjectStore();
+    await s.load();
+    s.select("a");
+    s.select("b", true);
+    expect(s.selectedAll.map((x) => x.id)).toEqual(["a", "b"]);
+    s.select("a", true); // the primary cannot be toggled off
+    expect(s.selectedAll.map((x) => x.id)).toEqual(["a", "b"]);
+    s.select("b", true); // toggles the extra off
+    expect(s.selectedAll.map((x) => x.id)).toEqual(["a"]);
+    s.select({ kind: "overlay", id: "o" }, true); // another row replaces the selection
+    expect(s.selectedAll).toEqual([{ kind: "overlay", id: "o" }]);
+    s.select("a"); s.select("b", true);
+    s.select("b"); // a plain click collapses to one
+    expect(s.selectedAll.map((x) => x.id)).toEqual(["b"]);
+    s.select("a", true);
+    const merged = { ...s.project!, clips: [s.project!.clips[0]] };
+    api.clipMerge.mockImplementationOnce(() => Promise.resolve({ project: merged, new_id: "a" }));
+    await s.mergeSelected();
+    expect(api.clipMerge).toHaveBeenCalledWith(["b", "a"]);
+    expect(s.clips.map((c) => c.id)).toEqual(["a"]);
+    expect(s.selectedAll.map((x) => x.id)).toEqual(["a"]);
+    expect(s.dirty).toBe(true);
+    await s.mergeSelected(); // one clip selected: nothing to do
+    expect(api.clipMerge).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("mutations", () => {
@@ -327,6 +354,8 @@ describe("mutations", () => {
     await s.setCrop({ scale: 2, x: 0.1, y: 0.9 });
     await s.setVideoMuted(true);
     expect(api.setVideoMuted).toHaveBeenCalledWith(true);
+    await s.setVideoVolume(0.3);
+    expect(api.setVideoVolume).toHaveBeenCalledWith(0.3);
     expect(api.clipTrim).toHaveBeenCalledWith("a", 100, 2000);
     expect(api.clipMove).toHaveBeenCalledWith("a", 1);
     expect(api.clipSetFades).toHaveBeenCalledWith("a", 10, 20);
@@ -342,7 +371,7 @@ describe("mutations", () => {
     await s.load();
     await s.overlayMove("o", 100, 1); await s.overlayLayerAdd(); await s.overlayLayerRemove(1); await s.overlayTrim("o", 0, 2000); await s.overlaySetFades("o", 1, 2);
     await s.overlaySetPlacement("o", { scale: 0.5, x: 0.1, y: 0.2 });
-    await s.audioTrackAdd("SFX"); await s.audioTrackUpdate("t", "Narration", true); await s.audioTrackRemove("t");
+    await s.audioTrackAdd("SFX"); await s.audioTrackUpdate("t", "Narration", true, 0.5); await s.audioTrackRemove("t");
     await s.renameClip("c", "Intro");
     expect(api.clipRename).toHaveBeenCalledWith("c", "Intro");
     await s.audioClipTrim("c", 1, 500); await s.audioClipSet("c", 0.5, 10, 20, true);
@@ -354,7 +383,7 @@ describe("mutations", () => {
     expect(api.overlaySetFades).toHaveBeenCalledWith("o", 1, 2);
     expect(api.overlaySetPlacement).toHaveBeenCalledWith("o", { scale: 0.5, x: 0.1, y: 0.2 });
     expect(api.audioTrackAdd).toHaveBeenCalledWith("SFX");
-    expect(api.audioTrackUpdate).toHaveBeenCalledWith("t", "Narration", true);
+    expect(api.audioTrackUpdate).toHaveBeenCalledWith("t", "Narration", true, 0.5);
     expect(api.audioTrackRemove).toHaveBeenCalledWith("t");
     expect(api.audioClipTrim).toHaveBeenCalledWith("c", 1, 500);
     expect(api.audioClipSet).toHaveBeenCalledWith("c", 0.5, 10, 20, true);

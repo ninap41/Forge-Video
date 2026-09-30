@@ -33,16 +33,27 @@ describe("ClipBlock", () => {
   it("emits select+dragStart on body, select+trim on the handles", async () => {
     const { w } = mountBlock();
     await w.trigger("pointerdown");
-    expect(w.emitted("select")).toHaveLength(1);
-    expect(w.emitted("dragStart")).toHaveLength(1);
+    expect(w.emitted("select")).toEqual([[false]]);
+    await w.trigger("pointerdown", { shiftKey: true });
+    expect(w.emitted("select")![1]).toEqual([true]);
+    // a right-click selects an unselected clip but leaves a selected one alone (so Merge can be reached)
+    await w.trigger("contextmenu");
+    expect(w.emitted("select")![2]).toEqual([false]);
+    await w.setProps({ selected: true });
+    await w.trigger("contextmenu");
+    expect(w.emitted("select")).toHaveLength(3);
+    expect(w.emitted("contextMenu")).toHaveLength(2);
+    await w.setProps({ selected: false });
+    expect(w.emitted("dragStart")).toHaveLength(2);
     const handles = w.findAll(".cursor-ew-resize");
     expect(handles).toHaveLength(2);
     await handles[0].trigger("pointerdown");
     await handles[1].trigger("pointerdown");
     expect(w.emitted("trimStart")).toHaveLength(1);
     expect(w.emitted("trimEnd")).toHaveLength(1);
-    expect(w.emitted("select")).toHaveLength(3);
-    expect(w.emitted("dragStart")).toHaveLength(1);
+    expect(w.emitted("select")).toHaveLength(5);
+    expect(w.emitted("select")!.slice(3)).toEqual([[false], [false]]);
+    expect(w.emitted("dragStart")).toHaveLength(2);
   });
 
   it("right-click selects and emits contextMenu without the browser menu", async () => {

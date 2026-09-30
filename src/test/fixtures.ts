@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { AudioClip, AudioTrack, Clip, ExportPlan, MediaInfo, OverlayClip, PoolItem, Project } from "../types/project";
+import type { AiStatus, AudioClip, AudioTrack, Clip, Cue, ExportPlan, Highlight, MediaInfo, OverlayClip, PoolItem, Project } from "../types/project";
 import { PLACEMENT_BADGE, PLACEMENT_FULL, STILL_DEFAULT_MS } from "../types/project";
 
 let n = 0;
@@ -27,7 +27,7 @@ export const project = (clips: Clip[] = [], over: Partial<Project> = {}): Projec
   }
   return {
     version: 2, id: "proj-1", name: "Test", aspect: "YouTube16x9", crop: { scale: 1, x: 0.5, y: 0.5 }, clips,
-    overlays: [], overlay_layers: 1, video_muted: false, audio_tracks: [], pool: [], fps: null, ...over,
+    overlays: [], overlay_layers: 1, video_muted: false, video_volume: 1, audio_tracks: [], pool: [], transcripts: [], highlights: [], fps: null, ...over,
   };
 };
 
@@ -42,7 +42,7 @@ export const audioClip = (over: Partial<AudioClip> = {}): AudioClip => {
 };
 export const audioTrack = (clips: AudioClip[] = [], over: Partial<AudioTrack> = {}): AudioTrack => {
   n += 1;
-  return { id: over.id ?? `trk-${n}`, label: "Music", muted: false, clips, ...over };
+  return { id: over.id ?? `trk-${n}`, label: "Music", muted: false, volume: 1, clips, ...over };
 };
 export const overlay = (over: Partial<OverlayClip> = {}): OverlayClip => {
   n += 1;
@@ -58,6 +58,17 @@ export const poolItem = (over: Partial<PoolItem> = {}): PoolItem => {
   return { id: over.id ?? `pool-${n}`, path: m.is_still ? `/images/img${n}.png` : m.width ? `/videos/clip${n}.mp4` : `/audio/a${n}.m4a`, media: m, ...over };
 };
 
+export const cue = (start: number, end: number, text: string, over: Partial<Cue> = {}): Cue => {
+  n += 1;
+  return { id: over.id ?? `cue-${n}`, start, end, text, ...over };
+};
+export const highlight = (over: Partial<Highlight> = {}): Highlight => {
+  n += 1;
+  const start = over.start ?? 1000, end = over.end ?? 8000;
+  return { id: over.id ?? `hl-${n}`, title: "The hook", reason: "Strong open", start, end, keep: [{ start, end }], fade_in: 0, fade_out: 0, notes: [], ...over };
+};
+export const AI_READY: AiStatus = { whisper: "/opt/homebrew/bin/whisper-cli", model: "/models/ggml-base.en.bin", model_path: "/models/ggml-base.en.bin", claude: "/opt/homebrew/bin/claude", account: "matt@example.com" };
+
 /** Two-clip project shared by the store/App tests: a = 5 s, b = 4 s. */
 export const baseProject = () => project([clip({ id: "a", source: "/videos/a.mp4" }), clip({ id: "b", source: "/videos/b.mp4", source_end: 4000 })]);
 
@@ -69,8 +80,8 @@ export function mockApi(p: Project) {
   const resolved = <T,>(v: T) => vi.fn<(...args: any[]) => Promise<T>>(() => Promise.resolve(v));
   return {
     projectGet: resolved(p), projectNew: resolved(p), projectOpen: resolved(p), projectSave: resolved("/saved.forgevideo"),
-    setAspect: resolved(p), setCrop: resolved(p), setVideoMuted: resolved(p), mediaImport: resolved(p), clipTrim: resolved(p),
-    clipSplit: resolved({ project: p, new_id: "new" }), clipDelete: resolved(p), clipMove: resolved(p), clipSetFades: resolved(p),
+    setAspect: resolved(p), setCrop: resolved(p), setVideoMuted: resolved(p), setVideoVolume: resolved(p), mediaImport: resolved(p), clipTrim: resolved(p),
+    clipSplit: resolved({ project: p, new_id: "new" }), clipMerge: resolved({ project: p, new_id: "new" }), clipDelete: resolved(p), clipMove: resolved(p), clipSetFades: resolved(p),
     clipSetTransition: resolved(p), clipSetVolume: resolved(p), clipDetachAudio: resolved(p), clipRename: resolved(p), clipInsert: resolved(p),
     poolAdd: resolved(p), poolRemove: resolved(p),
     overlayAdd: resolved(p), overlayMove: resolved(p), overlayLayerAdd: resolved(p), overlayLayerRemove: resolved(p), overlayTrim: resolved(p), overlaySplit: resolved({ project: p, new_id: "new" }),
@@ -81,20 +92,24 @@ export function mockApi(p: Project) {
     cacheThumbnails: resolved({ path: "x", interval_ms: 200, files: [] as string[] }), cacheWaveform: resolved({ bucket_ms: 10, peaks: [] as number[] }),
     exportPlan: resolved<ExportPlan>({ strategy: "StreamCopy", duration_ms: 5000, output: [1920, 1080], destination: "/o.mp4", reasons: [], args: [] }),
     exportStart: resolved("job-1"), jobCancel: resolved(true), ffmpegStatus: resolved<{ ffmpeg: string | null; ffprobe: string | null }>({ ffmpeg: "/opt/homebrew/bin/ffmpeg", ffprobe: "/opt/homebrew/bin/ffprobe" }),
+    aiStatus: resolved<AiStatus>({ ...AI_READY }), aiClaudeLogin: resolved(undefined), aiClaudeLogout: resolved(undefined), aiInstall: resolved(undefined), aiTranscribe: resolved("ai-job"), aiFindHighlights: resolved("ai-job"),
+    cueSetText: resolved(p), highlightDelete: resolved(p), highlightApply: resolved("/videos/Test - The hook.forgevideo"),
     onJobProgress: resolved<() => void>(() => {}), onJobDone: resolved<() => void>(() => {}), onJobError: resolved<() => void>(() => {}),
     assetUrl: (path: string) => `asset://localhost${path}`,
+    copyText: resolved(undefined),
   };
 }
 
 /** Make every project-returning command echo `p`, so edits do not wipe the store during component tests. */
 export function resolveWith(api: MockApi, p: Project) {
-  for (const k of ["projectGet", "projectNew", "projectOpen", "setAspect", "setCrop", "setVideoMuted", "mediaImport", "clipTrim", "clipDelete", "clipMove",
+  for (const k of ["projectGet", "projectNew", "projectOpen", "setAspect", "setCrop", "setVideoMuted", "setVideoVolume", "mediaImport", "clipTrim", "clipDelete", "clipMove",
     "clipSetFades", "clipSetTransition", "clipSetVolume", "clipDetachAudio", "clipRename", "clipInsert", "poolAdd", "poolRemove",
     "overlayAdd", "overlayMove", "overlayLayerAdd", "overlayLayerRemove", "overlayTrim", "overlayDelete", "overlaySetFades", "overlaySetPlacement",
-    "audioTrackAdd", "audioTrackUpdate", "audioTrackRemove", "audioClipAdd", "audioClipMove", "audioClipTrim", "audioClipDelete", "audioClipSet"] as const) {
+    "audioTrackAdd", "audioTrackUpdate", "audioTrackRemove", "audioClipAdd", "audioClipMove", "audioClipTrim", "audioClipDelete", "audioClipSet",
+    "cueSetText", "highlightDelete"] as const) {
     api[k].mockImplementation(() => Promise.resolve(p) as never);
   }
-  for (const k of ["clipSplit", "overlaySplit", "audioClipSplit"] as const) {
+  for (const k of ["clipSplit", "clipMerge", "overlaySplit", "audioClipSplit"] as const) {
     api[k].mockImplementation(() => Promise.resolve({ project: p, new_id: "new" }));
   }
 }

@@ -18,7 +18,7 @@ const plan = ref<ExportPlan | null>(null);
 const planError = ref<string | null>(null);
 const jobId = ref<string | null>(null);
 const progress = ref(0);
-const result = ref<{ destination: string } | null>(null);
+const result = ref<{ destination: string; captions?: string | null } | null>(null);
 const error = ref<string | null>(null);
 const startedAt = ref(0);
 const elapsed = ref(0);
@@ -40,7 +40,7 @@ async function pickDestination() {
 
 const unlisten: Array<() => void> = [];
 void api.onJobProgress((e) => { if (e.job_id === jobId.value) { progress.value = e.progress; elapsed.value = Date.now() - startedAt.value; } }).then((u) => unlisten.push(u));
-void api.onJobDone((e) => { if (e.job_id === jobId.value) { progress.value = 1; result.value = e.result; jobId.value = null; elapsed.value = Date.now() - startedAt.value; } }).then((u) => unlisten.push(u));
+void api.onJobDone((e) => { if (e.job_id === jobId.value && "destination" in e.result) { progress.value = 1; result.value = e.result; jobId.value = null; elapsed.value = Date.now() - startedAt.value; } }).then((u) => unlisten.push(u));
 void api.onJobError((e) => { if (e.job_id === jobId.value) { error.value = e.error; jobId.value = null; } }).then((u) => unlisten.push(u));
 onBeforeUnmount(() => unlisten.forEach((u) => u()));
 
@@ -108,7 +108,8 @@ const strategyLabel = computed(() => {
 
       <template v-else>
         <div class="text-emerald-300 mb-1">Done in {{ (elapsed / 1000).toFixed(1) }}s</div>
-        <div class="font-mono truncate mb-3" :title="result.destination">{{ result.destination }}</div>
+        <div class="font-mono truncate" :class="result.captions ? 'mb-1' : 'mb-3'" :title="result.destination">{{ result.destination }}</div>
+        <div v-if="result.captions" class="text-muted truncate mb-3" :title="result.captions">Captions: {{ basename(result.captions) }}</div>
         <div class="flex justify-end gap-2">
           <button class="rounded border border-line px-3 py-1.5" @click="revealItemInDir(result!.destination)">Reveal in Finder</button>
           <button class="rounded bg-accent text-black font-medium px-3 py-1.5" @click="close">Close</button>

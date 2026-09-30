@@ -21,7 +21,7 @@ only play what macOS WebKit plays (mp4/mov/m4v and common audio) and says so for
 **V1 · video** — the main track. Always contiguous: trimming or deleting ripples everything after.
 Video *or still images* (a still defaults to 5 s and stretches as far as you drag it). Per clip:
 frame-snapped trim handles, drag to reorder, fade in/out, volume and mute, and Cut / Cross dissolve /
-Dip to black into the next clip. The speaker icon in the gutter mutes the whole track.
+Dip to black into the next clip. The speaker icon in the gutter mutes the whole track and the slider under it is a track fader (0–100 %) on top of each clip's volume.
 
 **V2, V3, … · overlay layers** — composited above V1 for logos, lower-thirds, B-roll and
 picture-in-picture. Clips are free-positioned and silent; each layer keeps its clips from overlapping
@@ -30,12 +30,14 @@ scroll to resize; PNGs start as a small bottom-right badge, video starts full-fr
 clip. **+ Track → Video track** in the gutter adds a row; ✕ removes one.
 
 **Audio tracks** — as many as you like, each with a label (Music, SFX, Narration, Other, or your own
-text; click it to rename) and a track mute. Clips are free-positioned, can be dragged between tracks,
+text; click it to rename), a track mute and a track fader. Clips are free-positioned, can be dragged between tracks,
 and have volume, fade in/out and mute. Everything is mixed under the video audio and trimmed to the
 video length on export.
 
 **Split** the selected clip at the playhead with **⌘T**, on any track. The left half keeps its id;
-fades and transitions move to the outer ends.
+fades and transitions move to the outer ends. **Merge** undoes it: ⇧-click the pieces (two or more
+neighbours on the same track, from the same file, in order) and right-click → **Merge N clips**.
+The first piece keeps its id and name; fades and the transition come back from the outer ends.
 
 **Preview** mirrors the export: crop math, fades, dissolve opacity, every overlay layer, and every
 audio clip under the playhead. Drag the timeline's top edge to resize it.
@@ -43,6 +45,21 @@ audio clip under the playhead. Drag the timeline's top edge to resize it.
 **Export (⌘E)** stream-copies when a single untouched clip already matches the preset, otherwise
 re-encodes with `h264_videotoolbox` (Draft / Standard / High) and tells you why. Audio-only `.m4a`
 for podcasts. Progress, cancel, Reveal in Finder.
+
+**AI mode (✦ AI)** turns a long recording into shorts, using tools on this Mac instead of an API
+key. It needs the optional setup in step 7.
+
+1. **Transcribe** turns the speech on V1 into captions with `whisper-cli`. A **Copy** button puts the whole transcript on the clipboard as plain text. They appear as a caption
+   row under V1 and over the preview, and follow every trim, split and reorder. Double-click a
+   caption to correct it. Export writes a `.srt` beside the video; captions are not burned in.
+2. **Find highlights** sends the transcript (text only) to the Claude Code CLI, which suggests up to
+   ten sections that stand on their own. Each is marked on the timeline and listed with its edit
+   plan: what to keep, what to cut, fades, and notes for things to do by hand.
+3. **Create short** builds that plan as a new 9:16 project file next to the saved project. The
+   recording's own project is never changed.
+
+Only V1 is transcribed, and shorts do not carry over overlay or audio tracks. Highlights are not
+moved by later edits, so find them again after restructuring the timeline.
 
 **Projects** are pretty JSON `.forgevideo` files with media paths stored relative to the project
 folder. Files saved before audio tracks existed load their music bed as one "Music" track.
@@ -121,6 +138,31 @@ npm install
 
 Rust crates are fetched automatically on the first `cargo` or `tauri` command.
 
+### 7. AI mode (optional)
+
+Everything else works without this step. The quickest route is the **Install AI tools…** button in
+the AI panel (or `bash scripts/install-ai.sh`): it opens Terminal and installs Homebrew, ffmpeg,
+whisper.cpp, the speech model and Claude Code, skipping whatever is already there. By hand:
+
+```sh
+brew install whisper.cpp
+mkdir -p "$HOME/Library/Application Support/ForgeVideo/models"
+curl -L -o "$HOME/Library/Application Support/ForgeVideo/models/ggml-base.en.bin" \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+```
+
+`ggml-base.en.bin` (about 150 MB) is English only. To use another model, point
+`FORGE_WHISPER_MODEL` at its file.
+
+Install [Claude Code](https://claude.com/claude-code) (`brew install --cask claude-code` or the
+installer on that page). Then, in the AI panel, press **Sign in to Claude**: it opens Terminal on
+`claude auth login`, which sends you to the browser, and the panel shows the signed-in email once
+that finishes (**Sign out** next to it runs `claude auth logout`). ForgeVideo runs Claude as
+`claude -p` with no tools; usage counts against that Claude subscription.
+
+The AI panel shows which of the four (whisper-cli, model, Claude Code, account) is missing. `FORGE_WHISPER` and `FORGE_CLAUDE` override
+where the binaries are looked up.
+
 ## Run
 
 ```sh
@@ -185,12 +227,13 @@ npm test && npm run build && (cd src-tauri && cargo test)
 - `src/` Vue UI. `src/api/tauri.ts` is the only place that calls Rust.
 - `src/components/`: `Timeline.vue` (rows, gutter, drags, pool drops) · `MediaPool.vue` ·
   `ClipBlock.vue` (V1) and `FreeBlock.vue` (overlay + audio clips) · `Preview.vue` · `Inspector.vue`
-  · `MuteToggle.vue` (green speaker = audio on).
+  · `AiPanel.vue` (captions, highlights, edit plans) · `MuteToggle.vue` (green speaker = audio on).
 - `src-tauri/src/project` model + JSON persistence (v1 → v2 migration) · `timeline` pure edit ops
   (`relayout` keeps V1 contiguous and free lanes non-overlapping) · `media` ffprobe (stills get a
   default length) ·
   `cache` thumbnails/waveforms in `~/Library/Caches/ForgeVideo` · `render` export planner + ffmpeg
-  filter graph · `jobs` background jobs + progress events · `capture` reserved for recording (Phase 3).
+  filter graph · `jobs` background jobs + progress events · `ai` whisper transcription, captions,
+  Claude Code highlights and the short builder · `capture` reserved for recording (Phase 3).
 - `src-tauri/vendor/wry/` is a local copy of wry 0.55.1 with one fix in `src/wkwebview/drag_drop.rs`:
   upstream panics when a drag advertises file names but carries none (file promises). Wired in via
   `[patch.crates-io]` in `src-tauri/Cargo.toml`; drop it once upstream guards that unwrap.
@@ -225,6 +268,7 @@ The table is generated from `SHORTCUTS` in `src/components/HelpDialog.vue`; keep
 | Drag V1 clip | Reorder clips |
 | Right-click V1 clip | **Split audio from video**: sound moves to an audio track, the clip is muted |
 | Right-click any clip | **Rename…**: name the clip on the timeline (blank restores the file name) |
+| ⇧-click clips, right-click | **Merge N clips**: join neighbouring pieces of one file back into a single clip |
 | Drag overlay / audio clip | Move it in time, or to another layer / track |
 | Drag from media pool | Place on a track at that time |
 | Double-click pool item | Place it at the playhead |

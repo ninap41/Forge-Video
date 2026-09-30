@@ -7,18 +7,25 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
-fn find(name: &str) -> Result<PathBuf> {
-    if let Ok(p) = std::env::var(format!("FORGE_{}", name.to_uppercase())) {
+/// Directories searched before PATH. Homebrew paths are not on PATH inside a .app bundle launched from Finder.
+pub const BIN_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// Locate a CLI: the `env` override wins, then `BIN_DIRS`, then `extra_dirs`, then PATH.
+pub fn find_in(name: &str, env: &str, extra_dirs: &[PathBuf]) -> Result<PathBuf> {
+    if let Ok(p) = std::env::var(env) {
         return Ok(PathBuf::from(p));
     }
-    // Homebrew paths are not on PATH inside a .app bundle launched from Finder.
-    for candidate in ["/opt/homebrew/bin", "/usr/local/bin"] {
-        let p = PathBuf::from(candidate).join(name);
+    for dir in BIN_DIRS.iter().map(PathBuf::from).chain(extra_dirs.iter().cloned()) {
+        let p = dir.join(name);
         if p.is_file() {
             return Ok(p);
         }
     }
     which::which(name).map_err(|e| Error::BinaryNotFound(format!("{name}: {e}")))
+}
+
+fn find(name: &str) -> Result<PathBuf> {
+    find_in(name, &format!("FORGE_{}", name.to_uppercase()), &[])
 }
 
 pub fn ffmpeg_bin() -> Result<PathBuf> {

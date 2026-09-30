@@ -9,6 +9,7 @@ import { api } from "./api/tauri";
 import Preview from "./components/Preview.vue";
 import Timeline from "./components/Timeline.vue";
 import Inspector from "./components/Inspector.vue";
+import AiPanel from "./components/AiPanel.vue";
 import ExportDialog from "./components/ExportDialog.vue";
 import HelpDialog from "./components/HelpDialog.vue";
 import Banner from "./components/Banner.vue";
@@ -18,6 +19,7 @@ import { basename } from "./utils/time";
 const store = useProjectStore();
 const exportOpen = ref(false);
 const helpOpen = ref(false);
+const aiOpen = ref(false);
 const ffmpegMissing = ref(false);
 
 /** ⌘I: video lands on V1 and in the pool; audio and images go to the pool. */
@@ -42,6 +44,11 @@ async function openProject() {
   if (store.dirty && !(await ask("Discard unsaved changes?", { title: "ForgeVideo", kind: "warning" }))) return;
   const p = await open({ multiple: false, filters: [{ name: "ForgeVideo project", extensions: ["forgevideo", "json"] }] });
   if (typeof p === "string") await store.open(p);
+}
+/** A short created by AI mode: same unsaved-changes question as Open. */
+async function openShort(path: string) {
+  if (store.dirty && !(await ask("Discard unsaved changes?", { title: "ForgeVideo", kind: "warning" }))) return;
+  await store.open(path);
 }
 async function saveProject(as = false) {
   let path: string | undefined;
@@ -119,13 +126,18 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); unlistenDr
       <span v-if="store.error" class="text-danger truncate max-w-md mr-3" :title="store.error">{{ store.error }}</span>
       <span v-if="ffmpegMissing" class="text-danger mr-3">ffmpeg not found — brew install ffmpeg</span>
       <button class="px-2 py-1 rounded hover:bg-panel-2" :disabled="!store.clips.length" @click="store.playing = !store.playing">{{ store.playing ? '⏸ Pause' : '▶ Play' }}</button>
+      <button
+        class="ml-1 px-2 py-1 rounded border" :class="aiOpen ? 'border-accent text-accent bg-accent/10' : 'border-line hover:bg-panel-2'"
+        title="Captions and highlights for shorts" :aria-pressed="aiOpen" data-testid="ai-toggle" @click="aiOpen = !aiOpen"
+      >✦ AI</button>
       <button class="ml-1 px-3 py-1.5 rounded bg-accent text-black font-medium disabled:opacity-40" :disabled="!store.clips.length" @click="exportOpen = true">Export…</button>
       <button class="ml-1 w-7 h-7 rounded-full border border-line hover:bg-panel-2 font-semibold" title="Keyboard shortcuts (?)" aria-label="Help: keyboard shortcuts" @click="helpOpen = true">?</button>
     </header>
 
     <div class="flex-1 min-h-0 flex">
       <Preview />
-      <Inspector />
+      <AiPanel v-if="aiOpen" @open-project="openShort" />
+      <Inspector v-else />
     </div>
 
     <div

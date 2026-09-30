@@ -57,7 +57,12 @@ fn video_chain(p: &Project, i: usize, c: &Clip, fps: f64) -> String {
     format!("{}[v{i}]", chain.join(","))
 }
 
-fn audio_chain(i: usize, c: &Clip, track_muted: bool) -> String {
+/// Clip volume times the track fader, e.g. `volume=0.500`.
+fn gain(clip_volume: f32, track_volume: f32) -> String {
+    format!("volume={:.3}", clip_volume * track_volume)
+}
+
+fn audio_chain(i: usize, c: &Clip, track_muted: bool, track_volume: f32) -> String {
     let d = c.duration_ms();
     if !c.media.has_audio || c.muted || track_muted {
         return format!("anullsrc=r=48000:cl=stereo:d={}[a{i}]", f(d));
@@ -66,7 +71,7 @@ fn audio_chain(i: usize, c: &Clip, track_muted: bool) -> String {
         format!("[{i}:a]atrim=start={}:end={}", f(c.source_start), f(c.source_end)),
         "asetpts=PTS-STARTPTS".into(),
         AUDIO_FMT.into(),
-        format!("volume={:.3}", c.volume),
+        gain(c.volume, track_volume),
     ];
     if c.fade_in > 0 {
         chain.push(format!("afade=t=in:st=0:d={}", f(c.fade_in)));
@@ -125,13 +130,13 @@ fn overlay_chain(p: &Project, input: usize, k: usize, o: &OverlayClip, fps: f64)
 }
 
 /// One free-positioned audio clip: trimmed, shaped, then delayed to its timeline position.
-fn free_audio_chain(input: usize, label: &str, c: &AudioClip) -> String {
+fn free_audio_chain(input: usize, label: &str, c: &AudioClip, track_volume: f32) -> String {
     let d = c.duration_ms();
     let mut chain = vec![
         format!("[{input}:a]atrim=start={}:end={}", f(c.source_start), f(c.source_end)),
         "asetpts=PTS-STARTPTS".into(),
         AUDIO_FMT.into(),
-        format!("volume={:.3}", c.volume),
+        gain(c.volume, track_volume),
     ];
     if c.fade_in > 0 {
         chain.push(format!("afade=t=in:st=0:d={}", f(c.fade_in)));
@@ -168,9 +173,9 @@ pub fn build_args(p: &Project, s: &ExportSettings) -> Vec<String> {
         }).collect()
     };
     // Audible audio clips only; muted clips and muted tracks are not even inputs.
-    let audio: Vec<(usize, &AudioClip)> = p.audio_tracks.iter().filter(|t| !t.muted)
-        .flat_map(|t| t.clips.iter().filter(|c| !c.muted && c.timeline_start < v1_len))
-        .map(|c| (inputs.add(&c.source, &[]), c))
+    let audio: Vec<(usize, &AudioClip, f32)> = p.audio_tracks.iter().filter(|t| !t.muted)
+        .flat_map(|t| t.clips.iter().filter(|c| !c.muted && c.timeline_start < v1_len).map(move |c| (c, t.volume)))
+        .map(|(c, tv)| (inputs.add(&c.source, &[]), c, tv))
         .collect();
     let mut args = inputs.args;
 
@@ -179,7 +184,7 @@ pub fn build_args(p: &Project, s: &ExportSettings) -> Vec<String> {
         if !s.audio_only {
             filters.push(video_chain(p, i, c, fps));
         }
-        filters.push(audio_chain(i, c, p.video_muted));
+        filters.push(audio_chain(i, c, p.video_muted, p.video_volume));
     }
 
     // Chain clips left to right, honouring transition_out of the left clip.
@@ -232,9 +237,9 @@ pub fn build_args(p: &Project, s: &ExportSettings) -> Vec<String> {
     // Audio tracks, mixed under the V1 audio; `duration=first` keeps V1 as the clock.
     if !audio.is_empty() {
         let mut labels = vec![format!("[{cur_a}]")];
-        for (k, (input, c)) in audio.iter().enumerate() {
+        for (k, (input, c, track_volume)) in audio.iter().enumerate() {
             let label = format!("au{k}");
-            filters.push(free_audio_chain(*input, &label, c));
+            filters.push(free_audio_chain(*input, &label, c, *track_volume));
             labels.push(format!("[{label}]"));
         }
         filters.push(format!("{}amix=inputs={}:duration=first:normalize=0[amix]", labels.concat(), labels.len()));
@@ -525,6 +530,22 @@ mod more_tests {
         timeline::set_volume(&mut p, id, 0.25, false).unwrap();
         let fc = filter_of(&build_args(&p, &settings()));
         assert!(fc.contains("volume=0.250"), "{fc}");
+        // the V1 fader multiplies the clip volume
+        p.video_volume = 0.5;
+        let fc = filter_of(&build_args(&p, &settings()));
+        assert!(fc.contains("volume=0.125"), "{fc}");
+    }
+
+    #[test]
+    fn audio_track_fader_scales_its_clips() {
+        let mut p = two_clips();
+        let t = timeline::audio_track_add(&mut p, "Music");
+        let id = timeline::audio_clip_add(&mut p, t, AudioClip::new(PathBuf::from("/m.m4a"), audio_media(20_000)), 0).unwrap();
+        timeline::audio_clip_set(&mut p, id, 0.8, 0, 0, false).unwrap();
+        timeline::audio_track_update(&mut p, t, "Music", false, 0.25).unwrap();
+        let fc = filter_of(&build_args(&p, &settings()));
+        assert!(fc.contains("volume=0.200"), "{fc}");
+        assert!(fc.contains("amix"), "a turned-down track is still mixed: {fc}");
     }
 
     #[test]
@@ -560,12 +581,12 @@ mod more_tests {
         assert!(fc.contains("[ax1]atrim=end=10.000[aout]"), "{fc}");
         // unmute the clip, mute the track
         timeline::audio_clip_set(&mut p, id, 1.0, 0, 0, false).unwrap();
-        timeline::audio_track_update(&mut p, t, "Music", true).unwrap();
+        timeline::audio_track_update(&mut p, t, "Music", true, 1.0).unwrap();
         let args = build_args(&p, &settings());
         assert_eq!(args.iter().filter(|a| *a == "-i").count(), 2);
         assert!(!filter_of(&args).contains("amix"));
         // a clip that starts after V1 ends is also dropped
-        timeline::audio_track_update(&mut p, t, "Music", false).unwrap();
+        timeline::audio_track_update(&mut p, t, "Music", false, 1.0).unwrap();
         timeline::audio_clip_move(&mut p, id, t, 10_000).unwrap();
         assert_eq!(build_args(&p, &settings()).iter().filter(|a| *a == "-i").count(), 2);
     }
