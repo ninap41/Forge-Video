@@ -3,6 +3,7 @@
 export const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Space", action: "Play / pause" },
   { keys: "⌘ T", action: "Split selected clip at playhead" },
+  { keys: "⌘ J", action: "Join (merge) the selected clips (⇧-click to select several)" },
   { keys: "⌫ / Delete", action: "Delete selected clip" },
   { keys: "← / →", action: "Nudge playhead one frame" },
   { keys: "⇧ ← / ⇧ →", action: "Nudge playhead one second" },

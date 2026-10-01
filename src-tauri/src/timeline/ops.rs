@@ -3,7 +3,7 @@
 //! clip; overlay and audio clips are free-positioned, sorted, and never overlap within a track.
 
 use crate::error::{Error, Result};
-use crate::project::{AudioClip, Clip, Ms, OverlayClip, Placement, Project, Transition};
+use crate::project::{AudioClip, Clip, LayerAudio, Ms, OverlayClip, Placement, Project, TextClip, TextStyle, Transition, TEXT_DEFAULT_FONT, TEXT_MAX_CHARS};
 use uuid::Uuid;
 
 /// Minimum clip length we allow, so trims/splits can't produce zero-length clips.
@@ -60,6 +60,30 @@ pub fn relayout(p: &mut Project) {
     }
     let needed = p.overlays.iter().map(|o| o.layer + 1).max().unwrap_or(1);
     p.overlay_layers = p.overlay_layers.max(needed).max(1);
+    p.overlay_audio.resize(p.overlay_layers as usize, LayerAudio::default());
+    for la in &mut p.overlay_audio {
+        la.volume = if la.volume.is_finite() { la.volume.clamp(0.0, 1.0) } else { 1.0 };
+    }
+    for o in &mut p.overlays {
+        o.volume = if o.volume.is_finite() { o.volume.clamp(0.0, 2.0) } else { 1.0 };
+        o.opacity = if o.opacity.is_finite() { o.opacity.clamp(0.0, 1.0) } else { 1.0 };
+    }
+
+    // Text track: clamp the style and lengths, then sort and push apart like a single overlay row.
+    for t in &mut p.texts {
+        t.duration = t.duration.max(MIN_CLIP_MS);
+        t.fade_in = t.fade_in.min(t.duration);
+        t.fade_out = t.fade_out.min(t.duration - t.fade_in);
+        t.x = if t.x.is_finite() { t.x.clamp(0.0, 1.0) } else { 0.5 };
+        t.y = if t.y.is_finite() { t.y.clamp(0.0, 1.0) } else { 0.85 };
+        t.style = clean_style(t.style.clone());
+    }
+    p.texts.sort_by_key(|t| t.timeline_start);
+    let mut end: Ms = 0;
+    for t in &mut p.texts {
+        t.timeline_start = t.timeline_start.max(end);
+        end = t.end_ms();
+    }
 
     p.video_volume = if p.video_volume.is_finite() { p.video_volume.clamp(0.0, 1.0) } else { 1.0 };
     // Audio tracks: same rules per track.
@@ -283,6 +307,8 @@ pub fn rename(p: &mut Project, id: Uuid, name: &str) -> Result<()> {
         c.name = name;
     } else if let Some(o) = p.overlays.iter_mut().find(|o| o.id == id) {
         o.name = name;
+    } else if let Some(t) = p.texts.iter_mut().find(|t| t.id == id) {
+        t.name = name;
     } else {
         let (t, c) = aidx(p, id)?;
         p.audio_tracks[t].clips[c].name = name;
@@ -379,6 +405,31 @@ pub fn overlay_move(p: &mut Project, id: Uuid, timeline_start: Ms, layer: u32) -
 
 pub fn overlay_layer_add(p: &mut Project) {
     p.overlay_layers += 1;
+    p.overlay_audio.resize(p.overlay_layers as usize, LayerAudio::default());
+}
+
+/// Mute / fader for one overlay row.
+pub fn overlay_layer_set_audio(p: &mut Project, layer: u32, muted: bool, volume: f32) -> Result<()> {
+    relayout(p);
+    let la = p.overlay_audio.get_mut(layer as usize).ok_or_else(|| Error::InvalidEdit("no such overlay layer".into()))?;
+    la.muted = muted;
+    la.volume = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 };
+    Ok(())
+}
+
+/// Constant opacity (0–1) for one overlay clip.
+pub fn overlay_set_opacity(p: &mut Project, id: Uuid, opacity: f32) -> Result<()> {
+    let i = oidx(p, id)?;
+    p.overlays[i].opacity = if opacity.is_finite() { opacity.clamp(0.0, 1.0) } else { 1.0 };
+    Ok(())
+}
+
+/// Volume (0–2) and mute for one overlay clip.
+pub fn overlay_set_audio(p: &mut Project, id: Uuid, volume: f32, muted: bool) -> Result<()> {
+    let i = oidx(p, id)?;
+    p.overlays[i].volume = if volume.is_finite() { volume.clamp(0.0, 2.0) } else { 1.0 };
+    p.overlays[i].muted = muted;
+    Ok(())
 }
 
 /// Remove an overlay row and everything on it; higher rows shift down. The last row cannot go.
@@ -388,6 +439,9 @@ pub fn overlay_layer_remove(p: &mut Project, layer: u32) -> Result<()> {
     }
     p.overlays.retain(|o| o.layer != layer);
     for o in &mut p.overlays { if o.layer > layer { o.layer -= 1; } }
+    if (layer as usize) < p.overlay_audio.len() {
+        p.overlay_audio.remove(layer as usize);
+    }
     p.overlay_layers -= 1;
     relayout(p);
     Ok(())
@@ -452,6 +506,113 @@ pub fn overlay_set_placement(p: &mut Project, id: Uuid, placement: Placement) ->
 /// Overlays under a timeline position, lowest layer first, with matching source times.
 pub fn locate_overlays(p: &Project, t: Ms) -> Vec<(usize, Ms)> {
     p.overlays.iter().enumerate().filter(|(_, o)| t >= o.timeline_start && t < o.end_ms()).map(|(i, o)| (i, o.source_start + (t - o.timeline_start))).collect()
+}
+
+// ---------- Text track (T1) ----------
+
+fn xidx(p: &Project, id: Uuid) -> Result<usize> {
+    p.text_index(id).ok_or(Error::ClipNotFound(id))
+}
+
+fn claim_text(p: &mut Project, winner: usize) {
+    let mut spans: Vec<(Ms, Ms)> = p.texts.iter().map(|t| (t.timeline_start, t.end_ms())).collect();
+    claim(&mut spans, winner);
+    for (t, (s, _)) in p.texts.iter_mut().zip(spans) { t.timeline_start = s; }
+}
+
+/// Keep a style renderable: non-empty font, size 0.02–0.4, `#rrggbb` colours, text ≤ 500 chars.
+fn clean_style(mut st: TextStyle) -> TextStyle {
+    if st.text.chars().count() > TEXT_MAX_CHARS { st.text = st.text.chars().take(TEXT_MAX_CHARS).collect(); }
+    if st.font.trim().is_empty() { st.font = TEXT_DEFAULT_FONT.into(); }
+    st.size = if st.size.is_finite() { st.size.clamp(0.02, 0.4) } else { 0.08 };
+    if !is_hex_color(&st.color) { st.color = "#ffffff".into(); }
+    if let Some(b) = &mut st.backdrop {
+        if !is_hex_color(&b.color) { b.color = "#000000".into(); }
+        b.opacity = if b.opacity.is_finite() { b.opacity.clamp(0.0, 1.0) } else { 0.65 };
+    }
+    st
+}
+
+fn is_hex_color(c: &str) -> bool {
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+pub fn text_add(p: &mut Project, mut clip: TextClip, at: Ms) -> Uuid {
+    clip.timeline_start = at;
+    let id = clip.id;
+    p.texts.push(clip);
+    let i = p.texts.len() - 1;
+    claim_text(p, i);
+    relayout(p);
+    id
+}
+
+pub fn text_move(p: &mut Project, id: Uuid, timeline_start: Ms) -> Result<()> {
+    let i = xidx(p, id)?;
+    p.texts[i].timeline_start = timeline_start;
+    claim_text(p, i);
+    relayout(p);
+    Ok(())
+}
+
+/// A title has no source: trimming just sets its on-screen length.
+pub fn text_trim(p: &mut Project, id: Uuid, duration: Ms) -> Result<()> {
+    let i = xidx(p, id)?;
+    check_range(0, duration)?;
+    p.texts[i].duration = duration;
+    relayout(p);
+    Ok(())
+}
+
+pub fn text_split(p: &mut Project, id: Uuid, at_timeline_ms: Ms) -> Result<Uuid> {
+    let i = xidx(p, id)?;
+    let t = &p.texts[i];
+    let cut = split_point(t.timeline_start, 0, t.duration, at_timeline_ms)?;
+    let mut right = t.clone();
+    right.id = Uuid::new_v4();
+    right.fade_in = 0;
+    right.timeline_start = at_timeline_ms;
+    right.duration = t.duration - cut;
+    let left = &mut p.texts[i];
+    left.duration = cut;
+    left.fade_out = 0;
+    let new_id = right.id;
+    p.texts.insert(i + 1, right);
+    relayout(p);
+    Ok(new_id)
+}
+
+pub fn text_delete(p: &mut Project, id: Uuid) -> Result<()> {
+    let i = xidx(p, id)?;
+    p.texts.remove(i);
+    relayout(p);
+    Ok(())
+}
+
+pub fn text_set_fades(p: &mut Project, id: Uuid, fade_in: Ms, fade_out: Ms) -> Result<()> {
+    let i = xidx(p, id)?;
+    p.texts[i].fade_in = fade_in;
+    p.texts[i].fade_out = fade_out;
+    relayout(p);
+    Ok(())
+}
+
+pub fn text_set_position(p: &mut Project, id: Uuid, x: f32, y: f32) -> Result<()> {
+    let i = xidx(p, id)?;
+    p.texts[i].x = if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.5 };
+    p.texts[i].y = if y.is_finite() { y.clamp(0.0, 1.0) } else { 0.85 };
+    Ok(())
+}
+
+pub fn text_set_style(p: &mut Project, id: Uuid, style: TextStyle) -> Result<()> {
+    let i = xidx(p, id)?;
+    p.texts[i].style = clean_style(style);
+    Ok(())
+}
+
+/// Titles under a timeline position.
+pub fn locate_texts(p: &Project, t: Ms) -> Vec<usize> {
+    p.texts.iter().enumerate().filter(|(_, x)| t >= x.timeline_start && t < x.end_ms()).map(|(i, _)| i).collect()
 }
 
 // ---------- Audio tracks ----------
@@ -633,6 +794,40 @@ mod track_tests {
     }
 
     #[test]
+    fn overlay_audio_per_clip_and_per_row_with_layers_kept_in_step() {
+        let mut p = Project::new("m");
+        append(&mut p, Clip::new(PathBuf::from("/v.mp4"), vid(20_000)));
+        assert_eq!(p.overlay_audio.len(), 1);
+        let o = overlay_add(&mut p, OverlayClip::new(PathBuf::from("/b.mp4"), vid(8000)), 0, 0);
+        assert!(!p.overlays[0].muted && p.overlays[0].volume == 1.0, "new overlays are heard");
+        overlay_set_opacity(&mut p, o, 0.4).unwrap();
+        assert_eq!(p.overlays[0].opacity, 0.4);
+        overlay_set_opacity(&mut p, o, 5.0).unwrap();
+        assert_eq!(p.overlays[0].opacity, 1.0);
+        p.overlays[0].opacity = -1.0;
+        relayout(&mut p);
+        assert_eq!(p.overlays[0].opacity, 0.0, "relayout clamps opacity");
+        overlay_set_audio(&mut p, o, 3.0, true).unwrap();
+        assert_eq!((p.overlays[0].volume, p.overlays[0].muted), (2.0, true));
+        overlay_set_audio(&mut p, o, f32::NAN, false).unwrap();
+        assert_eq!(p.overlays[0].volume, 1.0);
+        assert!(overlay_set_audio(&mut p, Uuid::new_v4(), 1.0, false).is_err());
+        overlay_layer_add(&mut p);
+        overlay_layer_add(&mut p);
+        assert_eq!(p.overlay_audio.len(), 3);
+        overlay_layer_set_audio(&mut p, 1, true, 0.4).unwrap();
+        assert_eq!((p.overlay_audio[1].muted, p.overlay_audio[1].volume), (true, 0.4));
+        assert!(overlay_layer_set_audio(&mut p, 7, true, 0.4).is_err());
+        overlay_layer_remove(&mut p, 0).unwrap();
+        assert_eq!(p.overlay_audio.len(), 2);
+        assert_eq!((p.overlay_audio[0].muted, p.overlay_audio[0].volume), (true, 0.4), "row settings follow their row down");
+        // a project whose overlays outgrow the list gets it padded
+        p.overlay_audio.clear();
+        relayout(&mut p);
+        assert_eq!(p.overlay_audio.len(), p.overlay_layers as usize);
+    }
+
+    #[test]
     fn overlays_sort_and_push_apart() {
         let mut p = Project::new("o");
         let a = overlay_add(&mut p, OverlayClip::new("/a.mp4".into(), vid(4000)), 3000, 0);
@@ -669,6 +864,48 @@ mod track_tests {
         assert_eq!(p.overlay_layers, 5);
         for _ in 0..4 { overlay_layer_remove(&mut p, 1).unwrap(); }
         assert!(overlay_layer_remove(&mut p, 0).is_err(), "last layer stays");
+    }
+
+    #[test]
+    fn texts_push_apart_trim_split_and_clean_style() {
+        use crate::project::Backdrop;
+        let mut p = Project::new("t");
+        let a = text_add(&mut p, TextClip::new("Hello"), 3000);
+        let b = text_add(&mut p, TextClip::new("World"), 0);
+        assert_eq!(p.texts.iter().map(|t| t.id).collect::<Vec<_>>(), vec![b, a]);
+        assert_eq!(p.texts[1].timeline_start, 5000, "b (5 s) pushes a after it");
+        text_move(&mut p, a, 1000).unwrap();
+        assert_eq!(p.texts.iter().find(|t| t.id == a).unwrap().timeline_start, 1000);
+        assert_eq!(p.texts.iter().find(|t| t.id == b).unwrap().timeline_start, 6000, "moved clip wins");
+        assert_eq!(locate_texts(&p, 2000), vec![0]);
+        assert!(locate_texts(&p, 20_000).is_empty());
+        text_trim(&mut p, a, 2000).unwrap();
+        assert!(text_trim(&mut p, a, 50).is_err());
+        assert_eq!(p.texts[0].duration, 2000);
+        text_set_fades(&mut p, a, 5000, 5000).unwrap();
+        assert_eq!((p.texts[0].fade_in, p.texts[0].fade_out), (2000, 0));
+        text_set_fades(&mut p, a, 200, 300).unwrap();
+        let r = text_split(&mut p, a, 1500).unwrap();
+        assert_eq!((p.texts[0].duration, p.texts[0].fade_out), (500, 0));
+        let right = p.texts.iter().find(|t| t.id == r).unwrap();
+        assert_eq!((right.timeline_start, right.duration, right.fade_in, right.fade_out), (1500, 1500, 0, 300));
+        assert_eq!(right.style.text, "Hello", "style is shared by both halves");
+        assert!(text_split(&mut p, a, 1000).is_err());
+        // style cleaning: bad colours, sizes and fonts fall back; text is capped
+        text_set_style(&mut p, a, TextStyle { text: "x".repeat(600), font: "  ".into(), size: 9.0, color: "red".into(), backdrop: Some(Backdrop { color: "#12345".into(), opacity: 3.0 }) }).unwrap();
+        let st = &p.texts[0].style;
+        assert_eq!(st.text.len(), TEXT_MAX_CHARS);
+        assert_eq!((st.font.as_str(), st.size, st.color.as_str()), (TEXT_DEFAULT_FONT, 0.4, "#ffffff"));
+        assert_eq!(st.backdrop.as_ref().map(|b| (b.color.as_str(), b.opacity)), Some(("#000000", 1.0)));
+        text_set_style(&mut p, a, TextStyle { color: "#FF8800".into(), ..TextStyle::default() }).unwrap();
+        assert_eq!(p.texts[0].style.color, "#FF8800");
+        text_set_position(&mut p, a, 2.0, -1.0).unwrap();
+        assert_eq!((p.texts[0].x, p.texts[0].y), (1.0, 0.0));
+        rename(&mut p, a, "Lower third").unwrap();
+        assert_eq!(p.texts[0].name.as_deref(), Some("Lower third"));
+        text_delete(&mut p, a).unwrap();
+        assert!(text_delete(&mut p, a).is_err());
+        assert_eq!(p.texts.len(), 2);
     }
 
     #[test]

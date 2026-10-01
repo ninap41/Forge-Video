@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useProjectStore } from "../stores/project";
 import MuteToggle from "./MuteToggle.vue";
-import { ASPECT_PRESETS, PLACEMENT_BADGE, PLACEMENT_FULL, clipDuration, clipName, type Transition } from "../types/project";
+import { ASPECT_PRESETS, PLACEMENT_BADGE, PLACEMENT_FULL, TEXT_SIZE_MAX, TEXT_SIZE_MIN, clipDuration, clipName, type TextStyle, type Transition } from "../types/project";
 import { fmtMs } from "../utils/time";
 
 const store = useProjectStore();
@@ -10,6 +10,8 @@ const clip = computed(() => store.selectedClip);
 const isLast = computed(() => store.selectedIndex === store.clips.length - 1);
 const ov = computed(() => store.selectedOverlay);
 const au = computed(() => store.selectedAudio);
+const cap = computed(() => store.selectedCaptions);
+const tx = computed(() => store.selectedText);
 
 // Debounced slider commits: sliders update a local copy, commit on change (pointer release).
 const fades = ref({ fi: 0, fo: 0 });
@@ -33,19 +35,52 @@ const commitTransition = () => {
 const maxFade = computed(() => (clip.value ? Math.min(5000, clipDuration(clip.value)) : 0));
 
 // Overlay clip: fades, length (stills), size.
-const o = ref({ fi: 0, fo: 0, len: 5000, scale: 0.35 });
-watch(ov, (c) => { if (c) o.value = { fi: c.fade_in, fo: c.fade_out, len: clipDuration(c), scale: c.placement.scale }; }, { immediate: true, deep: true });
+const o = ref({ fi: 0, fo: 0, len: 5000, scale: 0.35, opacity: 1 });
+watch(ov, (c) => { if (c) o.value = { fi: c.fade_in, fo: c.fade_out, len: clipDuration(c), scale: c.placement.scale, opacity: c.opacity ?? 1 }; }, { immediate: true, deep: true });
+const commitOvOpacity = () => ov.value && store.overlaySetOpacity(ov.value.id, o.value.opacity);
 const ovMaxFade = computed(() => (ov.value ? Math.min(5000, clipDuration(ov.value)) : 0));
 const commitOvFades = () => ov.value && store.overlaySetFades(ov.value.id, o.value.fi, o.value.fo);
 const commitOvLen = () => ov.value && store.overlayTrim(ov.value.id, 0, Math.max(100, Math.round(o.value.len)));
 const commitOvScale = () => ov.value && store.overlaySetPlacement(ov.value.id, { ...ov.value.placement, scale: o.value.scale });
 const resetPlacement = () => ov.value && store.overlaySetPlacement(ov.value.id, ov.value.media.is_still ? { ...PLACEMENT_BADGE } : { ...PLACEMENT_FULL });
+// Overlay sound: volume + mute, like a V1 clip; only for video files that carry audio.
+const ovAudio = ref({ v: 1, muted: false });
+watch(ov, (c) => { if (c) ovAudio.value = { v: c.volume, muted: c.muted }; }, { immediate: true, deep: true });
+const ovHasAudio = computed(() => !!ov.value && ov.value.media.has_audio && !ov.value.media.is_still);
+const commitOvAudio = () => ov.value && store.overlaySetAudio(ov.value.id, ovAudio.value.v, ovAudio.value.muted);
 
 // Audio clip: volume, fades, mute; plus its track's label/mute.
 const a = ref({ v: 1, fi: 0, fo: 0, muted: false });
 watch(au, (x) => { if (x) a.value = { v: x.clip.volume, fi: x.clip.fade_in, fo: x.clip.fade_out, muted: x.clip.muted }; }, { immediate: true, deep: true });
 const auMaxFade = computed(() => (au.value ? Math.min(10_000, clipDuration(au.value.clip)) : 0));
 const commitAudio = () => au.value && store.audioClipSet(au.value.clip.id, a.value.v, a.value.fi, a.value.fo, a.value.muted);
+
+// Title: the whole style is edited locally and sent in one piece; length, fades and position separately.
+const t = ref<{ style: TextStyle; len: number; fi: number; fo: number; backdrop: boolean; bdColor: string; bdOpacity: number }>({
+  style: { text: "", font: "Quicksand", size: 0.08, color: "#ffffff", backdrop: null }, len: 5000, fi: 0, fo: 0, backdrop: false, bdColor: "#000000", bdOpacity: 0.65,
+});
+watch(tx, (c) => {
+  if (!c) return;
+  t.value = {
+    style: { ...c.style }, len: c.duration, fi: c.fade_in, fo: c.fade_out,
+    backdrop: !!c.style.backdrop, bdColor: c.style.backdrop?.color ?? t.value.bdColor, bdOpacity: c.style.backdrop?.opacity ?? t.value.bdOpacity,
+  };
+}, { immediate: true, deep: true });
+onMounted(() => { if (tx.value) void store.loadFonts(); });
+watch(tx, (c) => { if (c) void store.loadFonts(); });
+/** Every style control funnels through here so Rust always sees the complete style. */
+function commitStyle() {
+  if (!tx.value) return;
+  const style: TextStyle = { ...t.value.style, backdrop: t.value.backdrop ? { color: t.value.bdColor, opacity: t.value.bdOpacity } : null };
+  void store.textSetStyle(tx.value.id, style);
+}
+const commitTxLen = () => tx.value && store.textTrim(tx.value.id, Math.max(100, Math.round(t.value.len)));
+const txMaxFade = computed(() => (tx.value ? Math.min(5000, tx.value.duration) : 0));
+const commitTxFades = () => tx.value && store.textSetFades(tx.value.id, t.value.fi, t.value.fo);
+const resetTxPosition = () => tx.value && store.textSetPosition(tx.value.id, 0.5, 0.85);
+/** The picker lists what `fc-list` found; a font from a file made elsewhere is kept as its own entry. */
+const fontCss = (f: string) => `"${f.replace(/"/g, "")}", sans-serif`;
+const fontChoices = computed(() => (t.value.style.font && !store.fonts.includes(t.value.style.font) ? [t.value.style.font, ...store.fonts] : store.fonts));
 
 const crop = computed(() => store.project?.crop ?? { scale: 1, x: 0.5, y: 0.5 });
 const cropScale = ref(1);
@@ -79,7 +114,7 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
     <!-- Clip -->
     <section class="p-3 border-b border-line">
       <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Clip</h3>
-      <div v-if="!clip" class="text-muted">Select a clip on the timeline.</div>
+      <div v-if="!clip" class="text-muted">{{ cap ? 'Captions track selected.' : 'Select a clip on the timeline.' }}</div>
       <template v-else>
         <div class="font-medium truncate" :title="clip.source">{{ clipName(clip) }}</div>
         <div class="text-muted mb-2">
@@ -135,7 +170,7 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
       <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Overlay</h3>
       <div class="font-medium truncate" :title="ov.source">{{ clipName(ov) }}</div>
       <div class="text-muted mb-2">
-        {{ ov.media.is_still ? 'Still image' : 'Video (silent)' }} · {{ ov.media.width }}×{{ ov.media.height }}
+        {{ ov.media.is_still ? 'Still image' : ov.media.has_audio ? 'Video' : 'Video (no sound)' }} · {{ ov.media.width }}×{{ ov.media.height }}
         <br />At {{ fmtMs(ov.timeline_start) }} · {{ fmtMs(clipDuration(ov)) }}
       </div>
       <label v-if="ov.media.is_still" class="flex items-center gap-2 mt-2">
@@ -147,6 +182,11 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
         <span class="w-14 text-muted">Size</span>
         <input type="range" min="0.05" max="1" step="0.01" v-model.number="o.scale" class="flex-1" @change="commitOvScale" />
         <span class="w-10 text-right font-mono">{{ Math.round(o.scale * 100) }}%</span>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Opacity</span>
+        <input type="range" min="0" max="1" step="0.01" v-model.number="o.opacity" class="flex-1" data-testid="overlay-opacity" @change="commitOvOpacity" />
+        <span class="w-10 text-right font-mono">{{ Math.round(o.opacity * 100) }}%</span>
       </label>
       <button class="mt-1 text-muted hover:text-fg" @click="resetPlacement">Reset placement</button>
       <label class="flex items-center gap-2 mt-2">
@@ -160,10 +200,90 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
         <span class="w-10 text-right font-mono">{{ (o.fo / 1000).toFixed(2) }}s</span>
       </label>
       <div class="text-muted/70 mt-1">Drag it in the preview to place · scroll to resize.</div>
+      <template v-if="ovHasAudio">
+        <label class="flex items-center gap-2 mt-2">
+          <span class="w-14 text-muted">Volume</span>
+          <input type="range" min="0" max="2" step="0.05" v-model.number="ovAudio.v" class="flex-1" data-testid="overlay-volume" @change="commitOvAudio" />
+          <span class="w-10 text-right font-mono">{{ Math.round(ovAudio.v * 100) }}%</span>
+        </label>
+        <div class="flex items-center gap-2 mt-1">
+          <MuteToggle :muted="ovAudio.muted" label="overlay" @toggle="ovAudio.muted = !ovAudio.muted; commitOvAudio()" />
+          <span class="text-muted">{{ ovAudio.muted ? 'Clip muted' : 'Clip audio on' }} · row V{{ ov.layer + 2 }} {{ store.layerAudio(ov.layer).muted ? 'muted' : 'on' }}</span>
+        </div>
+      </template>
       <div class="flex gap-1 mt-3">
         <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" @click="store.splitAtPlayhead()">Split at playhead (⌘T)</button>
         <button class="rounded border border-line px-2 py-1 text-danger hover:border-danger" @click="store.deleteSelected()">Delete</button>
       </div>
+    </section>
+
+    <!-- Text track (T1) -->
+    <section v-if="tx" class="p-3 border-b border-line" data-testid="text-section">
+      <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Title</h3>
+      <div class="text-muted mb-2">At {{ fmtMs(tx.timeline_start) }} · {{ fmtMs(tx.duration) }} · burned into the video above every track</div>
+      <textarea
+        v-model="t.style.text" rows="3" maxlength="500" data-testid="text-text" aria-label="Title text" placeholder="Title (Enter for a new line)"
+        class="w-full bg-panel-2 border border-line rounded px-2 py-1 text-fg resize-y" @change="commitStyle"
+      />
+      <label class="flex items-center gap-2 mt-2">
+        <span class="w-14 text-muted">Font</span>
+        <select v-model="t.style.font" data-testid="text-font" class="flex-1 bg-panel-2 border border-line rounded px-1 py-0.5 text-fg" :style="{ fontFamily: fontCss(t.style.font) }" @change="commitStyle">
+          <option v-for="f in fontChoices" :key="f" :value="f" :style="{ fontFamily: fontCss(f) }">{{ f }}</option>
+        </select>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Size</span>
+        <input type="range" :min="TEXT_SIZE_MIN" :max="TEXT_SIZE_MAX" step="0.005" v-model.number="t.style.size" class="flex-1" data-testid="text-size" @change="commitStyle" />
+        <span class="w-10 text-right font-mono">{{ Math.round(t.style.size * 100) }}%</span>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Colour</span>
+        <input type="color" v-model="t.style.color" data-testid="text-color" aria-label="Text colour" @change="commitStyle" />
+        <span class="font-mono text-muted">{{ t.style.color }}</span>
+      </label>
+      <label class="flex items-center gap-2 mt-2">
+        <input type="checkbox" v-model="t.backdrop" data-testid="text-backdrop" @change="commitStyle" />
+        <span>Backdrop</span>
+        <template v-if="t.backdrop">
+          <input type="color" v-model="t.bdColor" data-testid="text-backdrop-color" aria-label="Backdrop colour" @change="commitStyle" />
+          <input type="range" min="0" max="1" step="0.05" v-model.number="t.bdOpacity" class="flex-1" data-testid="text-backdrop-opacity" aria-label="Backdrop opacity" @change="commitStyle" />
+          <span class="w-10 text-right font-mono">{{ Math.round(t.bdOpacity * 100) }}%</span>
+        </template>
+      </label>
+      <div v-if="t.backdrop" class="text-muted/70 mt-1">A rounded rectangle behind the text, any colour.</div>
+      <label class="flex items-center gap-2 mt-2">
+        <span class="w-14 text-muted">Length</span>
+        <input type="range" min="100" :max="Math.max(30000, t.len)" step="100" v-model.number="t.len" class="flex-1" data-testid="text-length" @change="commitTxLen" />
+        <span class="w-10 text-right font-mono">{{ (t.len / 1000).toFixed(1) }}s</span>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Fade in</span>
+        <input type="range" min="0" :max="txMaxFade" step="50" v-model.number="t.fi" class="flex-1" @change="commitTxFades" />
+        <span class="w-10 text-right font-mono">{{ (t.fi / 1000).toFixed(2) }}s</span>
+      </label>
+      <label class="flex items-center gap-2 mt-1">
+        <span class="w-14 text-muted">Fade out</span>
+        <input type="range" min="0" :max="txMaxFade" step="50" v-model.number="t.fo" class="flex-1" @change="commitTxFades" />
+        <span class="w-10 text-right font-mono">{{ (t.fo / 1000).toFixed(2) }}s</span>
+      </label>
+      <button class="mt-1 text-muted hover:text-fg" @click="resetTxPosition">Reset position</button>
+      <div class="text-muted/70 mt-1">Drag it in the preview to place · scroll to resize.</div>
+      <div class="flex gap-1 mt-3">
+        <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" @click="store.splitAtPlayhead()">Split at playhead (⌘T)</button>
+        <button class="rounded border border-line px-2 py-1 text-danger hover:border-danger" @click="store.deleteSelected()">Delete</button>
+      </div>
+    </section>
+
+    <!-- Captions track -->
+    <section v-if="cap" class="p-3 border-b border-line" data-testid="captions-section">
+      <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Captions</h3>
+      <div class="text-muted mb-2">{{ store.cues.length }} captions, derived from the transcript. They follow every edit to V1.</div>
+      <label class="flex items-center gap-2">
+        <input type="checkbox" :checked="store.captionsEnabled" data-testid="captions-enabled" @change="store.setCaptionsEnabled(($event.target as HTMLInputElement).checked)" />
+        <span>{{ store.captionsEnabled ? 'Captions on' : 'Captions off' }}</span>
+      </label>
+      <div class="text-muted/70 mt-1">{{ store.captionsEnabled ? 'Shown in the preview; export writes an .srt beside the video.' : 'Hidden in the preview; export writes no .srt. The transcript is kept.' }}</div>
+      <div class="text-muted/70 mt-1">Double-click a caption on the timeline to correct it.</div>
     </section>
 
     <!-- Audio clip -->

@@ -77,7 +77,49 @@ export interface OverlayClip {
   placement: Placement;
   /** Overlay row: 0 = V2, 1 = V3, … Higher layers composite on top. */
   layer: number;
+  /** 0–2 like V1 clips; files saved before overlays carried sound load muted. */
+  volume: number;
+  muted: boolean;
+  /** 0–1 constant opacity for composite shots, multiplied with the fades. */
+  opacity: number;
 }
+/** Mute and 0–1 fader for one overlay row (`Project.overlay_audio[layer]`). */
+export interface LayerAudio { muted: boolean; volume: number }
+export const LAYER_AUDIO_DEFAULT: LayerAudio = { muted: false, volume: 1 };
+
+/** Look of a title; mirrors `TextStyle` in model.rs. Rendered by the canvas rasteriser in `src/utils/textRaster.ts`. */
+export interface TextStyle {
+  /** "\n" starts a new line; ≤ 500 chars. */
+  text: string;
+  /** CSS family name the system knows. */
+  font: string;
+  /** Line height as a fraction of the frame height, 0.02–0.4. */
+  size: number;
+  /** #rrggbb */
+  color: string;
+  /** Rounded-rectangle behind the text; null = none. */
+  backdrop: Backdrop | null;
+}
+export interface Backdrop { color: string; opacity: number }
+export const TEXT_DEFAULT_FONT = "Quicksand";
+export const TEXT_STYLE_DEFAULT: TextStyle = { text: "Title", font: TEXT_DEFAULT_FONT, size: 0.08, color: "#ffffff", backdrop: null };
+export const TEXT_SIZE_MIN = 0.02;
+export const TEXT_SIZE_MAX = 0.4;
+
+/** A title on the text track (T1): centred at x/y (normalised), burned in above every overlay. */
+export interface TextClip {
+  id: string;
+  name?: string | null;
+  style: TextStyle;
+  timeline_start: Ms;
+  duration: Ms;
+  fade_in: Ms;
+  fade_out: Ms;
+  x: number;
+  y: number;
+}
+/** A rasterised title handed to `export_start`: base64 PNG bytes without the `data:` prefix. */
+export interface TextRaster { id: string; png: string }
 
 export interface AudioClip {
   id: string;
@@ -135,6 +177,10 @@ export interface Project {
   overlays: OverlayClip[];
   /** Number of overlay rows shown (≥ 1). */
   overlay_layers: number;
+  /** One entry per overlay row; Rust keeps it the same length as `overlay_layers`. */
+  overlay_audio: LayerAudio[];
+  /** Titles on the single text track. */
+  texts: TextClip[];
   /** Track-level mute for V1. */
   video_muted: boolean;
   /** V1 fader 0–1, multiplied into each clip's volume. */
@@ -142,6 +188,8 @@ export interface Project {
   audio_tracks: AudioTrack[];
   pool: PoolItem[];
   transcripts: Transcript[];
+  /** Off = caption row dimmed, no preview caption, no .srt on export. Old files load as on. */
+  captions_enabled: boolean;
   highlights: Highlight[];
   fps: Rational | null;
 }
@@ -176,6 +224,9 @@ export const projectDuration = (p: Project): Ms => {
   const last = p.clips[p.clips.length - 1];
   return last ? last.timeline_start + clipDuration(last) : 0;
 };
-/** What a clip is called on the timeline: its own name, else the file name. */
-export const clipName = (c: { name?: string | null; source: string }): string => c.name || (c.source.split("/").pop() ?? c.source);
+/** What a clip is called on the timeline: its own name, else the file name (a title: its first line). */
+export const clipName = (c: { name?: string | null; source?: string; style?: TextStyle }): string =>
+  c.name || (c.style ? (c.style.text.split("\n").find((l) => l.trim()) ?? "Title") : (c.source?.split("/").pop() ?? c.source ?? ""));
+/** Timeline end of a title. */
+export const textEnd = (t: TextClip): Ms => t.timeline_start + t.duration;
 export const transitionMs = (t: Transition): Ms => (t.type === "None" ? 0 : t.ms);

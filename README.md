@@ -24,10 +24,20 @@ frame-snapped trim handles, drag to reorder, fade in/out, volume and mute, and C
 Dip to black into the next clip. The speaker icon in the gutter mutes the whole track and the slider under it is a track fader (0–100 %) on top of each clip's volume.
 
 **V2, V3, … · overlay layers** — composited above V1 for logos, lower-thirds, B-roll and
-picture-in-picture. Clips are free-positioned and silent; each layer keeps its clips from overlapping
+picture-in-picture. Clips are free-positioned; each layer keeps its clips from overlapping
 (a clip you drop pushes what it lands on). Select an overlay and drag it in the preview to place it,
-scroll to resize; PNGs start as a small bottom-right badge, video starts full-frame. Fade in/out per
-clip. **+ Track → Video track** in the gutter adds a row; ✕ removes one.
+scroll to resize; PNGs start as a small bottom-right badge, video starts full-frame. Fade in/out and
+a constant **Opacity** per clip, so a half-transparent video over V1 makes a composite shot. A video overlay's own sound plays too: volume and mute per clip in the Inspector, plus a mute
+and fader for the whole row in the gutter, all mixed into the export. Projects saved before this
+load their overlays muted. **+ Track → Video track** in the gutter adds a row; ✕ removes one.
+
+**T1 · text track** — titles burned into the video, above every other layer. **+ Text** in the gutter
+drops a 5 s title at the playhead; drag it in time, trim its length from either edge, ⌘T splits it,
+⌫ deletes it. The Inspector's **Title** section takes multi-line text (Enter for a new line), **any font
+installed on the Mac**, a size slider, a colour well that opens the macOS colour panel, and an optional
+**Backdrop**: a rounded rectangle behind the text in any colour and opacity. Drag the title in the
+preview to place it, scroll to resize. Text is drawn by the app itself (not ffmpeg), so the export shows
+exactly what the preview did. Captions from AI mode are separate and still go to an `.srt`.
 
 **Audio tracks** — as many as you like, each with a label (Music, SFX, Narration, Other, or your own
 text; click it to rename), a track mute and a track fader. Clips are free-positioned, can be dragged between tracks,
@@ -36,7 +46,7 @@ video length on export.
 
 **Split** the selected clip at the playhead with **⌘T**, on any track. The left half keeps its id;
 fades and transitions move to the outer ends. **Merge** undoes it: ⇧-click the pieces (two or more
-neighbours on the same track, from the same file, in order) and right-click → **Merge N clips**.
+neighbours on the same track, from the same file, in order) and press **⌘J** (join) or right-click → **Merge N clips**.
 The first piece keeps its id and name; fades and the transition come back from the outer ends.
 
 **Preview** mirrors the export: crop math, fades, dissolve opacity, every overlay layer, and every
@@ -49,7 +59,7 @@ for podcasts. Progress, cancel, Reveal in Finder.
 **AI mode (✦ AI)** turns a long recording into shorts, using tools on this Mac instead of an API
 key. It needs the optional setup in step 7.
 
-1. **Transcribe** turns the speech on V1 into captions with `whisper-cli`. A **Copy** button puts the whole transcript on the clipboard as plain text. They appear as a caption
+1. **Transcribe** turns the speech on V1 into captions with `whisper-cli`. A **Copy** button puts the whole transcript on the clipboard as plain text. Click the **CC** label to select the captions track and switch it off in the Inspector (no preview caption, no .srt) without losing the transcript. They appear as a caption
    row under V1 and over the preview, and follow every trim, split and reorder. Double-click a
    caption to correct it. Export writes a `.srt` beside the video; captions are not burned in.
 2. **Find highlights** sends the transcript (text only) to the Claude Code CLI, which suggests up to
@@ -155,7 +165,9 @@ curl -L -o "$HOME/Library/Application Support/ForgeVideo/models/ggml-base.en.bin
 `FORGE_WHISPER_MODEL` at its file.
 
 Install [Claude Code](https://claude.com/claude-code) (`brew install --cask claude-code` or the
-installer on that page). Then, in the AI panel, press **Sign in to Claude**: it opens Terminal on
+installer on that page). The first time ForgeVideo opens, a welcome dialog offers both steps
+(**Install AI tools…** and **Sign in to Claude**); **Skip for now** and it never asks again. Later,
+in the AI panel, press **Sign in to Claude**: it opens Terminal on
 `claude auth login`, which sends you to the browser, and the panel shows the signed-in email once
 that finishes (**Sign out** next to it runs `claude auth logout`). ForgeVideo runs Claude as
 `claude -p` with no tools; usage counts against that Claude subscription.
@@ -234,7 +246,7 @@ npm test && npm run build && (cd src-tauri && cargo test)
   `cache` thumbnails/waveforms in `~/Library/Caches/ForgeVideo` · `render` export planner + ffmpeg
   filter graph · `jobs` background jobs + progress events · `ai` whisper transcription, captions,
   Claude Code highlights and the short builder · `capture` reserved for recording (Phase 3).
-- `src-tauri/vendor/wry/` is a local copy of wry 0.55.1 with one fix in `src/wkwebview/drag_drop.rs`:
+- `src-tauri/vendor/wry/` is a local copy of wry 0.57.0 with one fix in `src/wkwebview/drag_drop.rs`:
   upstream panics when a drag advertises file names but carries none (file promises). Wired in via
   `[patch.crates-io]` in `src-tauri/Cargo.toml`; drop it once upstream guards that unwrap.
 
@@ -246,6 +258,7 @@ Press **?** or click the **?** button at the right of the toolbar to see this li
 |---|---|
 | Space | Play / pause |
 | ⌘ T | Split selected clip at playhead |
+| ⌘ J | Join (merge) the selected clips (⇧-click to select several) |
 | ⌫ / Delete | Delete selected clip |
 | ← / → | Nudge playhead one frame |
 | ⇧ ← / ⇧ → | Nudge playhead one second |
@@ -273,7 +286,7 @@ The table is generated from `SHORTCUTS` in `src/components/HelpDialog.vue`; keep
 | Drag from media pool | Place on a track at that time |
 | Double-click pool item | Place it at the playhead |
 | Click ruler / drag | Scrub the playhead |
-| Drag preview | Reposition the crop, or place the selected overlay |
-| Scroll on preview | Zoom the crop, or resize the selected overlay |
+| Drag preview | Reposition the crop, or place the selected overlay / title |
+| Scroll on preview | Zoom the crop, or resize the selected overlay / title |
 | Drop media files | Add to the media pool |
 | Drag timeline top edge | Resize the timeline panel |

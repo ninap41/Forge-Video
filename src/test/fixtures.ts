@@ -1,6 +1,6 @@
 import { vi } from "vitest";
-import type { AiStatus, AudioClip, AudioTrack, Clip, Cue, ExportPlan, Highlight, MediaInfo, OverlayClip, PoolItem, Project } from "../types/project";
-import { PLACEMENT_BADGE, PLACEMENT_FULL, STILL_DEFAULT_MS } from "../types/project";
+import type { AiStatus, AudioClip, AudioTrack, Clip, Cue, ExportPlan, Highlight, MediaInfo, OverlayClip, PoolItem, Project, TextClip } from "../types/project";
+import { PLACEMENT_BADGE, PLACEMENT_FULL, STILL_DEFAULT_MS, TEXT_STYLE_DEFAULT } from "../types/project";
 
 let n = 0;
 export const media = (over: Partial<MediaInfo> = {}): MediaInfo => ({
@@ -27,7 +27,7 @@ export const project = (clips: Clip[] = [], over: Partial<Project> = {}): Projec
   }
   return {
     version: 2, id: "proj-1", name: "Test", aspect: "YouTube16x9", crop: { scale: 1, x: 0.5, y: 0.5 }, clips,
-    overlays: [], overlay_layers: 1, video_muted: false, video_volume: 1, audio_tracks: [], pool: [], transcripts: [], highlights: [], fps: null, ...over,
+    overlays: [], overlay_layers: 1, overlay_audio: [{ muted: false, volume: 1 }], texts: [], video_muted: false, video_volume: 1, audio_tracks: [], pool: [], transcripts: [], captions_enabled: true, highlights: [], fps: null, ...over,
   };
 };
 
@@ -49,8 +49,12 @@ export const overlay = (over: Partial<OverlayClip> = {}): OverlayClip => {
   const m = over.media ?? stillMedia();
   return {
     id: over.id ?? `ov-${n}`, source: m.is_still ? `/images/logo${n}.png` : `/videos/broll${n}.mp4`, media: m, source_start: 0, source_end: m.duration_ms,
-    timeline_start: 0, fade_in: 0, fade_out: 0, placement: m.is_still ? { ...PLACEMENT_BADGE } : { ...PLACEMENT_FULL }, layer: 0, ...over,
+    timeline_start: 0, fade_in: 0, fade_out: 0, placement: m.is_still ? { ...PLACEMENT_BADGE } : { ...PLACEMENT_FULL }, layer: 0, volume: 1, muted: false, opacity: 1, ...over,
   };
+};
+export const textClip = (over: Partial<TextClip> = {}): TextClip => {
+  n += 1;
+  return { id: over.id ?? `txt-${n}`, style: { ...TEXT_STYLE_DEFAULT, text: `Title ${n}` }, timeline_start: 0, duration: STILL_DEFAULT_MS, fade_in: 0, fade_out: 0, x: 0.5, y: 0.85, ...over };
 };
 export const poolItem = (over: Partial<PoolItem> = {}): PoolItem => {
   n += 1;
@@ -80,12 +84,14 @@ export function mockApi(p: Project) {
   const resolved = <T,>(v: T) => vi.fn<(...args: any[]) => Promise<T>>(() => Promise.resolve(v));
   return {
     projectGet: resolved(p), projectNew: resolved(p), projectOpen: resolved(p), projectSave: resolved("/saved.forgevideo"),
-    setAspect: resolved(p), setCrop: resolved(p), setVideoMuted: resolved(p), setVideoVolume: resolved(p), mediaImport: resolved(p), clipTrim: resolved(p),
+    setAspect: resolved(p), setCrop: resolved(p), setVideoMuted: resolved(p), setVideoVolume: resolved(p), setCaptionsEnabled: resolved(p), mediaImport: resolved(p), clipTrim: resolved(p),
     clipSplit: resolved({ project: p, new_id: "new" }), clipMerge: resolved({ project: p, new_id: "new" }), clipDelete: resolved(p), clipMove: resolved(p), clipSetFades: resolved(p),
     clipSetTransition: resolved(p), clipSetVolume: resolved(p), clipDetachAudio: resolved(p), clipRename: resolved(p), clipInsert: resolved(p),
     poolAdd: resolved(p), poolRemove: resolved(p),
     overlayAdd: resolved(p), overlayMove: resolved(p), overlayLayerAdd: resolved(p), overlayLayerRemove: resolved(p), overlayTrim: resolved(p), overlaySplit: resolved({ project: p, new_id: "new" }),
-    overlayDelete: resolved(p), overlaySetFades: resolved(p), overlaySetPlacement: resolved(p),
+    overlayDelete: resolved(p), overlaySetFades: resolved(p), overlaySetAudio: resolved(p), overlaySetOpacity: resolved(p), overlayLayerSetAudio: resolved(p), overlaySetPlacement: resolved(p),
+    textAdd: resolved(p), textMove: resolved(p), textTrim: resolved(p), textSplit: resolved({ project: p, new_id: "new" }), textDelete: resolved(p),
+    textSetFades: resolved(p), textSetPosition: resolved(p), textSetStyle: resolved(p), systemFonts: resolved(["Quicksand", "Orbit", "Helvetica Neue", "Impact"]),
     audioTrackAdd: resolved(p), audioTrackUpdate: resolved(p), audioTrackRemove: resolved(p),
     audioClipAdd: resolved(p), audioClipMove: resolved(p), audioClipTrim: resolved(p), audioClipSplit: resolved({ project: p, new_id: "new" }),
     audioClipDelete: resolved(p), audioClipSet: resolved(p),
@@ -102,14 +108,15 @@ export function mockApi(p: Project) {
 
 /** Make every project-returning command echo `p`, so edits do not wipe the store during component tests. */
 export function resolveWith(api: MockApi, p: Project) {
-  for (const k of ["projectGet", "projectNew", "projectOpen", "setAspect", "setCrop", "setVideoMuted", "setVideoVolume", "mediaImport", "clipTrim", "clipDelete", "clipMove",
+  for (const k of ["projectGet", "projectNew", "projectOpen", "setAspect", "setCrop", "setVideoMuted", "setVideoVolume", "setCaptionsEnabled", "mediaImport", "clipTrim", "clipDelete", "clipMove",
     "clipSetFades", "clipSetTransition", "clipSetVolume", "clipDetachAudio", "clipRename", "clipInsert", "poolAdd", "poolRemove",
-    "overlayAdd", "overlayMove", "overlayLayerAdd", "overlayLayerRemove", "overlayTrim", "overlayDelete", "overlaySetFades", "overlaySetPlacement",
+    "overlayAdd", "overlayMove", "overlayLayerAdd", "overlayLayerRemove", "overlayTrim", "overlayDelete", "overlaySetFades", "overlaySetAudio", "overlaySetOpacity", "overlayLayerSetAudio", "overlaySetPlacement",
     "audioTrackAdd", "audioTrackUpdate", "audioTrackRemove", "audioClipAdd", "audioClipMove", "audioClipTrim", "audioClipDelete", "audioClipSet",
+    "textAdd", "textMove", "textTrim", "textDelete", "textSetFades", "textSetPosition", "textSetStyle",
     "cueSetText", "highlightDelete"] as const) {
     api[k].mockImplementation(() => Promise.resolve(p) as never);
   }
-  for (const k of ["clipSplit", "clipMerge", "overlaySplit", "audioClipSplit"] as const) {
+  for (const k of ["clipSplit", "clipMerge", "overlaySplit", "audioClipSplit", "textSplit"] as const) {
     api[k].mockImplementation(() => Promise.resolve({ project: p, new_id: "new" }));
   }
 }

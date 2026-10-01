@@ -71,6 +71,7 @@ pub fn stream_copy_blockers(p: &Project) -> Vec<String> {
     let c = &p.clips[0];
     if c.fade_in > 0 || c.fade_out > 0 { r.push("fades".into()); }
     if !p.overlays.is_empty() { r.push("overlay track".into()); }
+    if p.texts.iter().any(|t| t.timeline_start < p.duration_ms()) { r.push("text track".into()); }
     if p.audio_tracks.iter().any(|t| !t.clips.is_empty()) { r.push("audio tracks".into()); }
     if !p.crop.is_identity() { r.push("crop / reposition".into()); }
     if !source_matches_preset(p, p.aspect) { r.push("aspect ratio change".into()); }
@@ -87,6 +88,11 @@ impl crate::project::Clip {
 }
 
 pub fn plan(p: &Project, s: &ExportSettings) -> crate::error::Result<ExportPlan> {
+    plan_with_texts(p, s, &[])
+}
+
+/// `plan` with the rasterised titles the webview produced for this export.
+pub fn plan_with_texts(p: &Project, s: &ExportSettings, texts: &[crate::render::graph::TextRaster]) -> crate::error::Result<ExportPlan> {
     if p.clips.is_empty() {
         return Err(crate::error::Error::Export("timeline is empty".into()));
     }
@@ -98,7 +104,7 @@ pub fn plan(p: &Project, s: &ExportSettings) -> crate::error::Result<ExportPlan>
             output: (0, 0),
             destination: s.destination.clone(),
             reasons: vec![],
-            args: crate::render::graph::build_args(p, s),
+            args: crate::render::graph::build_args_with_texts(p, s, texts),
         });
     }
     let reasons = stream_copy_blockers(p);
@@ -130,7 +136,7 @@ pub fn plan(p: &Project, s: &ExportSettings) -> crate::error::Result<ExportPlan>
         output: p.aspect.dimensions(),
         destination: s.destination.clone(),
         reasons,
-        args: crate::render::graph::build_args(p, s),
+        args: crate::render::graph::build_args_with_texts(p, s, texts),
     })
 }
 
@@ -260,6 +266,12 @@ mod more_tests {
         let mut p2 = p.clone();
         timeline::overlay_add(&mut p2, OverlayClip::new(PathBuf::from("/o.mp4"), media(1280, 720)), 0, 0);
         assert_eq!(stream_copy_blockers(&p2), vec!["overlay track"]);
+
+        let mut p2 = p.clone();
+        let tid = timeline::text_add(&mut p2, TextClip::new("Hi"), 0);
+        assert_eq!(stream_copy_blockers(&p2), vec!["text track"]);
+        timeline::text_move(&mut p2, tid, 60_000).unwrap();
+        assert!(stream_copy_blockers(&p2).is_empty(), "a title after V1 ends is not a blocker");
 
         let mut p2 = p.clone();
         p2.crop = Crop { scale: 1.5, x: 0.5, y: 0.5 };

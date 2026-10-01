@@ -2,7 +2,8 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useProjectStore } from "../stores/project";
 import { api } from "../api/tauri";
-import { ASPECT_PRESETS, clipDuration, transitionMs, type OverlayClip, type Placement } from "../types/project";
+import { ASPECT_PRESETS, TEXT_SIZE_MAX, TEXT_SIZE_MIN, clipDuration, transitionMs, type OverlayClip, type Placement, type TextClip } from "../types/project";
+import { rasterText } from "../utils/textRaster";
 import { basename, clamp } from "../utils/time";
 
 const store = useProjectStore();
@@ -35,6 +36,10 @@ const ovs = computed(() => store.currentOverlays);
 /** The selected overlay, if it is on screen right now: the one preview drags act on. */
 const ov = computed(() => ovs.value.find((o) => store.selected?.kind === "overlay" && store.selected.id === o.clip.id) ?? null);
 const ovSelected = computed(() => !!ov.value);
+const txs = computed(() => store.currentTexts);
+/** The selected title, if it is on screen right now: preview drags move it, the wheel resizes it. */
+const tx = computed(() => txs.value.find((t) => store.selected?.kind === "text" && store.selected.id === t.clip.id) ?? null);
+const txSelected = computed(() => !!tx.value);
 const curStill = computed(() => !!cur.value?.clip.media.is_still);
 
 // Local crop while dragging; committed to Rust on pointer-up.
@@ -84,8 +89,25 @@ function overlayStyle(o: { clip: OverlayClip }) {
   const w = W * pl.scale, h = sw > 0 ? w * (sh / sw) : w * 9 / 16;
   return {
     width: `${w}px`, height: `${h}px`, left: `${W * pl.x - w / 2}px`, top: `${H * pl.y - h / 2}px`,
-    opacity: String(clamp(fadeAt(o.clip, store.playhead - o.clip.timeline_start), 0, 1)),
+    opacity: String(clamp(fadeAt(o.clip, store.playhead - o.clip.timeline_start) * (o.clip.opacity ?? 1), 0, 1)),
   };
+}
+
+/** Same canvas raster as the export, at preview size, centred on (x, y). */
+function textStyle(t: { clip: TextClip; opacity: number }) {
+  const { w: W, h: H } = frameSize.value;
+  if (!W) return {};
+  const local = tx.value?.clip.id === t.clip.id ? localText.value : null;
+  const style = local ? { ...t.clip.style, size: local.size } : t.clip.style;
+  const pos = local ?? t.clip;
+  const r = rasterText(style, W, H);
+  return { width: `${r.w}px`, height: `${r.h}px`, left: `${W * pos.x - r.w / 2}px`, top: `${H * pos.y - r.h / 2}px`, opacity: String(t.opacity) };
+}
+function textSrc(t: { clip: TextClip }) {
+  const { w: W, h: H } = frameSize.value;
+  if (!W) return "";
+  const local = tx.value?.clip.id === t.clip.id ? localText.value : null;
+  return rasterText(local ? { ...t.clip.style, size: local.size } : t.clip.style, W, H).url;
 }
 
 const fadeOpacity = computed(() => {
@@ -107,18 +129,30 @@ const dragging = ref(false);
 const localPlacement = ref<Placement | null>(null);
 watch(() => ov.value?.clip.placement, (p) => { if (!dragging.value) localPlacement.value = p ? { ...p } : null; }, { deep: true, immediate: true });
 
-let dragStart = { x: 0, y: 0, cx: 0, cy: 0, overlay: false };
+// Local position / size while dragging or scrolling the selected title; committed on release.
+const localText = ref<{ x: number; y: number; size: number } | null>(null);
+watch(() => tx.value?.clip, (t) => { if (!dragging.value) localText.value = t ? { x: t.x, y: t.y, size: t.style.size } : null; }, { deep: true, immediate: true });
+
+let dragStart = { x: 0, y: 0, cx: 0, cy: 0, overlay: false, text: false };
 function onPointerDown(e: PointerEvent) {
   if (!cur.value) return;
   dragging.value = true;
-  const overlay = ovSelected.value && !!localPlacement.value;
-  dragStart = overlay
-    ? { x: e.clientX, y: e.clientY, cx: localPlacement.value!.x, cy: localPlacement.value!.y, overlay }
-    : { x: e.clientX, y: e.clientY, cx: localCrop.value.x, cy: localCrop.value.y, overlay };
+  const text = txSelected.value && !!localText.value;
+  const overlay = !text && ovSelected.value && !!localPlacement.value;
+  dragStart = text
+    ? { x: e.clientX, y: e.clientY, cx: localText.value!.x, cy: localText.value!.y, overlay, text }
+    : overlay
+    ? { x: e.clientX, y: e.clientY, cx: localPlacement.value!.x, cy: localPlacement.value!.y, overlay, text }
+    : { x: e.clientX, y: e.clientY, cx: localCrop.value.x, cy: localCrop.value.y, overlay, text };
   (e.target as HTMLElement).setPointerCapture(e.pointerId);
 }
 function onPointerMove(e: PointerEvent) {
   if (!dragging.value) return;
+  if (dragStart.text) {
+    const { w: W, h: H } = frameSize.value; if (!W || !localText.value) return;
+    localText.value = { ...localText.value, x: clamp(dragStart.cx + (e.clientX - dragStart.x) / W, 0, 1), y: clamp(dragStart.cy + (e.clientY - dragStart.y) / H, 0, 1) };
+    return;
+  }
   if (dragStart.overlay) {
     const { w: W, h: H } = frameSize.value; if (!W || !localPlacement.value) return;
     localPlacement.value = { ...localPlacement.value, x: clamp(dragStart.cx + (e.clientX - dragStart.x) / W, 0, 1), y: clamp(dragStart.cy + (e.clientY - dragStart.y) / H, 0, 1) };
@@ -137,13 +171,20 @@ function onPointerMove(e: PointerEvent) {
 function onPointerUp() {
   if (!dragging.value) return;
   dragging.value = false;
-  if (dragStart.overlay && ov.value && localPlacement.value) void store.overlaySetPlacement(ov.value.clip.id, { ...localPlacement.value });
+  if (dragStart.text && tx.value && localText.value) void store.textSetPosition(tx.value.clip.id, localText.value.x, localText.value.y);
+  else if (dragStart.overlay && ov.value && localPlacement.value) void store.overlaySetPlacement(ov.value.clip.id, { ...localPlacement.value });
   else void store.setCrop({ ...localCrop.value });
 }
 let wheelTimer: number | undefined;
 function onWheel(e: WheelEvent) {
   if (!cur.value) return;
   e.preventDefault();
+  if (txSelected.value && localText.value) {
+    localText.value = { ...localText.value, size: clamp(localText.value.size * (e.deltaY < 0 ? 1.05 : 0.95), TEXT_SIZE_MIN, TEXT_SIZE_MAX) };
+    window.clearTimeout(wheelTimer);
+    wheelTimer = window.setTimeout(() => { if (tx.value && localText.value) void store.textSetStyle(tx.value.clip.id, { ...tx.value.clip.style, size: localText.value.size }); }, 200);
+    return;
+  }
   if (ovSelected.value && localPlacement.value) {
     localPlacement.value = { ...localPlacement.value, scale: clamp(localPlacement.value.scale * (e.deltaY < 0 ? 1.05 : 0.95), 0.05, 1) };
     window.clearTimeout(wheelTimer);
@@ -176,7 +217,8 @@ function syncOverlay() {
     if (!e || o.clip.media.is_still) continue;
     const t = o.sourceMs / 1000;
     if (Math.abs(e.currentTime - t) > 0.08) e.currentTime = t;
-    e.muted = true;
+    e.muted = o.gain === 0;
+    e.volume = o.gain;
     if (store.playing && e.paused) void e.play().catch(() => {});
     if (!store.playing && !e.paused) e.pause();
   }
@@ -279,7 +321,7 @@ function onMediaError(source: string) {
 }
 // New audio elements (playhead entered a clip) and volume/mute edits need a nudge.
 watch(() => store.activeAudioClips.map((a) => `${a.clip.id}:${a.clip.volume}:${a.track.volume}:${a.silent}`).join(","), () => { void Promise.resolve().then(syncAudio); });
-watch(() => ovs.value.map((o) => o.clip.id).join(","), () => { void Promise.resolve().then(syncOverlay); });
+watch(() => ovs.value.map((o) => `${o.clip.id}:${o.gain}`).join(","), () => { void Promise.resolve().then(syncOverlay); });
 watch(() => [store.project?.video_muted, store.project?.video_volume], syncSeek);
 
 const ro = new ResizeObserver(([e]) => { stageSize.value = { w: e.contentRect.width, h: e.contentRect.height }; });
@@ -307,15 +349,19 @@ onBeforeUnmount(() => { ro.disconnect(); cancelAnimationFrame(raf); });
         />
         <video
           v-else :ref="(el) => setOverlayEl(o.clip.id, el)" :src="api.assetUrl(o.clip.source)" class="absolute max-w-none pointer-events-none object-fill"
-          :class="ov?.clip.id === o.clip.id ? 'outline outline-1 outline-accent' : ''" :style="overlayStyle(o)" playsinline preload="auto" muted data-testid="overlay-layer" @loadedmetadata="syncOverlay" @error="onMediaError(o.clip.source)"
+          :class="ov?.clip.id === o.clip.id ? 'outline outline-1 outline-accent' : ''" :style="overlayStyle(o)" playsinline preload="auto" :muted="o.gain === 0" data-testid="overlay-layer" @loadedmetadata="syncOverlay" @error="onMediaError(o.clip.source)"
         />
       </template>
+      <img
+        v-for="t in txs" :key="t.clip.id" :src="textSrc(t)" class="absolute max-w-none pointer-events-none"
+        :class="tx?.clip.id === t.clip.id ? 'outline outline-1 outline-accent' : ''" :style="textStyle(t)" draggable="false" data-testid="text-layer"
+      />
       <div
         v-if="store.currentCue" data-testid="caption" class="absolute inset-x-0 bottom-[12%] px-[6%] text-center font-semibold leading-snug pointer-events-none"
         :style="{ fontSize: Math.max(10, frameSize.h * 0.045) + 'px' }"
       ><span class="bg-black/65 text-white rounded px-[0.4em] py-[0.1em] [box-decoration-break:clone] [-webkit-box-decoration-break:clone]">{{ store.currentCue.text }}</span></div>
       <div class="absolute bottom-1 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 rounded">
-        {{ preset.label }} {{ preset.sub }} · {{ ovSelected ? 'drag to place overlay · scroll to resize' : 'drag to reposition · scroll to zoom' }}
+        {{ preset.label }} {{ preset.sub }} · {{ txSelected ? 'drag to place title · scroll to resize' : ovSelected ? 'drag to place overlay · scroll to resize' : 'drag to reposition · scroll to zoom' }}
       </div>
     </div>
     <audio

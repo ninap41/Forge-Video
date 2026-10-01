@@ -53,7 +53,7 @@ describe("api → invoke mapping", () => {
       ["audio_clip_add", { trackId: "t", path: "/m.m4a", at: 250 }],
       ["audio_clip_set", { id: "c", volume: 0.5, fadeIn: 1, fadeOut: 2, muted: false }],
       ["cache_thumbnails", { path: "/v.mp4", durationMs: 5000 }],
-      ["export_start", { settings: { destination: "/o.mp4", quality: "High", audio_only: false } }],
+      ["export_start", { settings: { destination: "/o.mp4", quality: "High", audio_only: false }, texts: [] }],
       ["job_cancel", { jobId: "j" }],
       ["ffmpeg_status"],
     ]);
@@ -73,17 +73,17 @@ describe("api → invoke mapping", () => {
   });
 
   it("covers every remaining command once", async () => {
-    await api.projectGet(); await api.projectOpen("/p"); await api.setAspect("Square1x1"); await api.setCrop({ scale: 2, x: 0, y: 1 }); await api.setVideoMuted(true); await api.setVideoVolume(0.5);
+    await api.projectGet(); await api.projectOpen("/p"); await api.setAspect("Square1x1"); await api.setCrop({ scale: 2, x: 0, y: 1 }); await api.setVideoMuted(true); await api.setVideoVolume(0.5); await api.setCaptionsEnabled(false);
     await api.mediaImport("/v.mp4"); await api.clipDelete("id"); await api.clipInsert("/v.mp4", 0);
     await api.poolAdd("/a"); await api.poolRemove("p");
-    await api.overlayMove("o", 1, 0); await api.overlayLayerAdd(); await api.overlayLayerRemove(1); await api.overlayTrim("o", 0, 1); await api.overlaySplit("o", 1); await api.overlayDelete("o"); await api.overlaySetFades("o", 1, 2);
+    await api.overlayMove("o", 1, 0); await api.overlayLayerAdd(); await api.overlayLayerRemove(1); await api.overlayTrim("o", 0, 1); await api.overlaySplit("o", 1); await api.overlayDelete("o"); await api.overlaySetFades("o", 1, 2); await api.overlaySetAudio("o", 0.5, true); await api.overlaySetOpacity("o", 0.5); await api.overlayLayerSetAudio(1, true, 0.5);
     await api.audioTrackAdd("SFX"); await api.audioTrackUpdate("t", "x", true, 0.5); await api.audioTrackRemove("t");
     await api.audioClipMove("c", "t", 1); await api.audioClipTrim("c", 0, 1); await api.audioClipSplit("c", 1); await api.audioClipDelete("c");
     await api.cacheWaveform("/v.mp4"); await api.exportPlan({ destination: "/o", quality: "Draft", audio_only: true });
     expect(invoke.mock.calls.map((c) => c[0])).toEqual([
-      "project_get", "project_open", "project_set_aspect", "project_set_crop", "project_set_video_muted", "project_set_video_volume", "media_import", "clip_delete", "clip_insert",
+      "project_get", "project_open", "project_set_aspect", "project_set_crop", "project_set_video_muted", "project_set_video_volume", "project_set_captions_enabled", "media_import", "clip_delete", "clip_insert",
       "pool_add", "pool_remove",
-      "overlay_move", "overlay_layer_add", "overlay_layer_remove", "overlay_trim", "overlay_split", "overlay_delete", "overlay_set_fades",
+      "overlay_move", "overlay_layer_add", "overlay_layer_remove", "overlay_trim", "overlay_split", "overlay_delete", "overlay_set_fades", "overlay_set_audio", "overlay_set_opacity", "overlay_layer_set_audio",
       "audio_track_add", "audio_track_update", "audio_track_remove",
       "audio_clip_move", "audio_clip_trim", "audio_clip_split", "audio_clip_delete",
       "cache_waveform", "export_plan",

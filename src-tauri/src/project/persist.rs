@@ -128,6 +128,23 @@ mod more_tests {
     }
 
     #[test]
+    fn overlays_saved_before_they_carried_sound_load_muted() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("silent.forgevideo");
+        std::fs::write(&file, r#"{"version":2,"id":"6f6f5c1e-0000-4000-8000-000000000001","name":"s","aspect":"YouTube16x9",
+            "crop":{"scale":1.0,"x":0.5,"y":0.5},"clips":[],"overlay_layers":2,
+            "overlays":[{"id":"6f6f5c1e-0000-4000-8000-000000000002","source":"/b.mp4","source_start":0,"source_end":1000,"timeline_start":0,"fade_in":0,"fade_out":0,"layer":1,
+              "placement":{"scale":1.0,"x":0.5,"y":0.5},
+              "media":{"duration_ms":1000,"width":1280,"height":720,"fps":{"num":30,"den":1},"codec":"h264","container":"mov,mp4","has_audio":true,"audio_codec":"aac","sample_rate":48000,"rotation":0,"is_still":false}}],
+            "fps":null}"#).unwrap();
+        let l = load(&file).unwrap();
+        assert!(l.overlays[0].muted, "no `muted` field means the overlay was silent when saved");
+        assert_eq!(l.overlays[0].volume, 1.0);
+        assert_eq!(l.overlay_audio.len(), 2, "one row entry per layer, unmuted at 100 %");
+        assert!(!l.overlay_audio[1].muted);
+    }
+
+    #[test]
     fn load_relayouts_and_clamps_stale_transitions() {
         // Hand-written file with wrong timeline_start values and an oversized transition.
         let dir = tempfile::tempdir().unwrap();

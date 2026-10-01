@@ -19,9 +19,14 @@ export function resizeAll(width: number, height: number) {
 }
 
 export const ctx2d = {
-  clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: "",
+  clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: "", font: "", textAlign: "", textBaseline: "",
+  /** 10 px per character, so tests can predict box sizes. */
+  measureText: vi.fn((t: string) => ({ width: t.length * 10 })),
+  fillText: vi.fn(), beginPath: vi.fn(), roundRect: vi.fn(), fill: vi.fn(), arcTo: vi.fn(), moveTo: vi.fn(), closePath: vi.fn(),
 };
 Object.defineProperty(HTMLCanvasElement.prototype, "getContext", { value: () => ctx2d, configurable: true });
+export const FAKE_PNG_URL = "data:image/png;base64,iVBORw0KGgo=";
+Object.defineProperty(HTMLCanvasElement.prototype, "toDataURL", { value: vi.fn(() => FAKE_PNG_URL), configurable: true });
 
 for (const m of ["play", "pause", "load"]) {
   Object.defineProperty(HTMLMediaElement.prototype, m, { value: vi.fn(() => Promise.resolve()), configurable: true, writable: true });

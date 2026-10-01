@@ -4,7 +4,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type {
-  AiStatus, AspectPreset, Crop, ExportPlan, ExportSettings, JobDone, JobError, JobProgress, Ms, Placement, Project, Transition,
+  AiStatus, AspectPreset, Crop, ExportPlan, ExportSettings, JobDone, JobError, JobProgress, Ms, Placement, Project, TextRaster, TextStyle, Transition,
 } from "../types/project";
 
 export type SplitResult = { project: Project; new_id: string };
@@ -19,6 +19,7 @@ export const api = {
   projectSave: (path?: string) => invoke<string>("project_save", { path: path ?? null }),
   setAspect: (aspect: AspectPreset) => invoke<Project>("project_set_aspect", { aspect }),
   setCrop: (crop: Crop) => invoke<Project>("project_set_crop", { crop }),
+  setCaptionsEnabled: (enabled: boolean) => invoke<Project>("project_set_captions_enabled", { enabled }),
   setVideoMuted: (muted: boolean) => invoke<Project>("project_set_video_muted", { muted }),
   setVideoVolume: (volume: number) => invoke<Project>("project_set_video_volume", { volume }),
 
@@ -50,7 +51,21 @@ export const api = {
   overlaySplit: (id: string, at: Ms) => invoke<SplitResult>("overlay_split", { id, at: ms(at) }),
   overlayDelete: (id: string) => invoke<Project>("overlay_delete", { id }),
   overlaySetFades: (id: string, fadeIn: Ms, fadeOut: Ms) => invoke<Project>("overlay_set_fades", { id, fadeIn: ms(fadeIn), fadeOut: ms(fadeOut) }),
+  overlaySetOpacity: (id: string, opacity: number) => invoke<Project>("overlay_set_opacity", { id, opacity }),
+  overlaySetAudio: (id: string, volume: number, muted: boolean) => invoke<Project>("overlay_set_audio", { id, volume, muted }),
+  overlayLayerSetAudio: (layer: number, muted: boolean, volume: number) => invoke<Project>("overlay_layer_set_audio", { layer, muted, volume }),
   overlaySetPlacement: (id: string, placement: Placement) => invoke<Project>("overlay_set_placement", { id, placement }),
+
+  textAdd: (text: string, at: Ms) => invoke<Project>("text_add", { text, at: ms(at) }),
+  textMove: (id: string, at: Ms) => invoke<Project>("text_move", { id, at: ms(at) }),
+  textTrim: (id: string, duration: Ms) => invoke<Project>("text_trim", { id, duration: ms(duration) }),
+  textSplit: (id: string, at: Ms) => invoke<SplitResult>("text_split", { id, at: ms(at) }),
+  textDelete: (id: string) => invoke<Project>("text_delete", { id }),
+  textSetFades: (id: string, fadeIn: Ms, fadeOut: Ms) => invoke<Project>("text_set_fades", { id, fadeIn: ms(fadeIn), fadeOut: ms(fadeOut) }),
+  textSetPosition: (id: string, x: number, y: number) => invoke<Project>("text_set_position", { id, x, y }),
+  textSetStyle: (id: string, style: TextStyle) => invoke<Project>("text_set_style", { id, style }),
+  /** Every installed font family (bundled ones first); falls back to a short macOS list. */
+  systemFonts: () => invoke<string[]>("system_fonts"),
 
   audioTrackAdd: (label: string) => invoke<Project>("audio_track_add", { label }),
   audioTrackUpdate: (id: string, label: string, muted: boolean, volume: number) => invoke<Project>("audio_track_update", { id, label, muted, volume }),
@@ -67,7 +82,8 @@ export const api = {
   cacheWaveform: (path: string) => invoke<{ bucket_ms: number; peaks: number[] }>("cache_waveform", { path }),
 
   exportPlan: (settings: ExportSettings) => invoke<ExportPlan>("export_plan", { settings }),
-  exportStart: (settings: ExportSettings) => invoke<string>("export_start", { settings }),
+  /** `texts` carries one PNG per title inside the V1 span, rasterised at the output size. */
+  exportStart: (settings: ExportSettings, texts: TextRaster[] = []) => invoke<string>("export_start", { settings, texts }),
   jobCancel: (jobId: string) => invoke<boolean>("job_cancel", { jobId }),
   ffmpegStatus: () => invoke<{ ffmpeg: string | null; ffprobe: string | null }>("ffmpeg_status"),
 

@@ -33,5 +33,7 @@ html, body, #app { height: 100%; margin: 0; background: var(--color-bg); color: 
 input[type=range] { accent-color: var(--color-accent); }
 /* Gutter faders: short, thin, and they never steal the row height. */
 .fader { height: 10px; width: 100%; cursor: ew-resize; }
+/* Colour wells (text track): a small swatch that opens the macOS colour panel. */
+input[type=color] { width: 28px; height: 20px; padding: 0; border: 1px solid var(--color-line); border-radius: 4px; background: none; cursor: pointer; }
 
 button:disabled { opacity: .4; cursor: default; }

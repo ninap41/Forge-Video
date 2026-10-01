@@ -1,7 +1,7 @@
 //! Runs real ffmpeg against the fixtures: stream-copy trim and a full multi-clip render.
 
 use forge_video_lib::project::*;
-use forge_video_lib::render::{plan, ffmpeg, ExportSettings, Quality, Strategy};
+use forge_video_lib::render::{plan, plan_with_texts, ffmpeg, ExportSettings, Quality, Strategy};
 use forge_video_lib::{media, timeline};
 use std::path::PathBuf;
 
@@ -121,6 +121,36 @@ async fn overlay_png_and_video_over_v1_with_two_audio_tracks() {
     assert_eq!((mi.width, mi.height), (1920, 1080));
     assert!(mi.has_audio);
     assert!((4800..=5200).contains(&mi.duration_ms), "audio must not extend past V1: {}", mi.duration_ms);
+}
+
+#[tokio::test]
+async fn text_raster_is_burned_in_above_the_overlay() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = fixture("clip_a_720p.mp4");
+    let logo = fixture("logo.png");
+    let mut p = Project::new("t");
+    timeline::append(&mut p, Clip::new(a.clone(), media::probe(&a).await.unwrap()));
+    let ida = p.clips[0].id;
+    timeline::trim(&mut p, ida, 0, 3000).unwrap();
+    timeline::overlay_add(&mut p, OverlayClip::new(logo.clone(), media::probe(&logo).await.unwrap()), 0, 0);
+    let mut t = TextClip::new("Hello");
+    t.fade_in = 200; t.fade_out = 200;
+    let tid = timeline::text_add(&mut p, t, 500);
+    timeline::text_trim(&mut p, tid, 2000).unwrap();
+    // the webview would rasterise the title; any PNG proves the path
+    let raster = dir.path().join("title.png");
+    std::fs::copy(&logo, &raster).unwrap();
+
+    let out = dir.path().join("text.mp4");
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false };
+    let plan = plan_with_texts(&p, &s, &[(tid, raster)]).unwrap();
+    assert!(plan.reasons.contains(&"text track".to_string()), "{:?}", plan.reasons);
+    let mut last = 0.0;
+    ffmpeg::run_with_progress(&plan.args, plan.duration_ms, |f| last = f, None).await.unwrap();
+    assert_eq!(last, 1.0);
+    let mi = media::probe(&out).await.unwrap();
+    assert_eq!((mi.width, mi.height), (1920, 1080));
+    assert!((2800..=3200).contains(&mi.duration_ms), "{}", mi.duration_ms);
 }
 
 /// Render a short synthetic file with ffmpeg; None when this ffmpeg build lacks the encoder.

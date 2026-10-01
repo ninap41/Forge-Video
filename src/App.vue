@@ -12,6 +12,7 @@ import Inspector from "./components/Inspector.vue";
 import AiPanel from "./components/AiPanel.vue";
 import ExportDialog from "./components/ExportDialog.vue";
 import HelpDialog from "./components/HelpDialog.vue";
+import WelcomeDialog, { welcomeSeen } from "./components/WelcomeDialog.vue";
 import Banner from "./components/Banner.vue";
 import { MEDIA_EXT, VIDEO_EXT, isMediaPath } from "./utils/media";
 import { basename } from "./utils/time";
@@ -19,6 +20,8 @@ import { basename } from "./utils/time";
 const store = useProjectStore();
 const exportOpen = ref(false);
 const helpOpen = ref(false);
+/** First launch: set up the AI tools and the Claude account; dismissed once, remembered in localStorage. */
+const welcomeOpen = ref(!welcomeSeen());
 const aiOpen = ref(false);
 const ffmpegMissing = ref(false);
 
@@ -70,9 +73,10 @@ function onKey(e: KeyboardEvent) {
   const meta = e.metaKey || e.ctrlKey;
   if (e.key === "Escape") { helpOpen.value = false; return; }
   if (e.key === "?" && !meta) { e.preventDefault(); helpOpen.value = !helpOpen.value; return; }
-  if (helpOpen.value) return;
+  if (helpOpen.value || welcomeOpen.value) return;
   if (e.code === "Space") { e.preventDefault(); if (store.clips.length) store.playing = !store.playing; }
   else if (meta && e.key === "t") { e.preventDefault(); void store.splitAtPlayhead(); }
+  else if (meta && e.key === "j") { e.preventDefault(); void store.mergeSelected(); }
   else if ((e.key === "Backspace" || e.key === "Delete") && store.selected) { e.preventDefault(); void store.deleteSelected(); }
   else if (e.key === "ArrowLeft") { store.playing = false; store.seek(store.playhead - (e.shiftKey ? 1000 : 33)); }
   else if (e.key === "ArrowRight") { store.playing = false; store.seek(store.playhead + (e.shiftKey ? 1000 : 33)); }
@@ -150,6 +154,7 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); unlistenDr
 
     <ExportDialog :open="exportOpen" @close="exportOpen = false" />
     <HelpDialog :open="helpOpen" @close="helpOpen = false" />
+    <WelcomeDialog :open="welcomeOpen" @close="welcomeOpen = false" />
     <Banner />
   </div>
 </template>

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { audioClip, audioTrack, clip, cue, highlight, media, overlay, poolItem, project, resolveWith, stillMedia, audioMedia, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, clip, cue, highlight, media, overlay, poolItem, project, resolveWith, stillMedia, audioMedia, textClip, type MockApi } from "../test/fixtures";
 import FreeBlock from "./FreeBlock.vue";
 
 vi.mock("../api/tauri", async () => {
@@ -200,7 +200,7 @@ describe("Timeline", () => {
   it("the gutter adds, mutes, renames and removes audio tracks", async () => {
     const { w } = setup(project([clip({ id: "a" })], { audio_tracks: [audioTrack([], { id: "t1", label: "Music" })] }));
     const gutterButtons = w.findAll("button");
-    expect(gutterButtons.filter((b) => b.text().startsWith("+"))).toHaveLength(1);
+    expect(gutterButtons.filter((b) => b.text().startsWith("+ Track"))).toHaveLength(1);
     await w.find("[data-testid=add-track]").trigger("click");
     const items = w.findAll("[data-testid=add-track-menu] button");
     expect(items.map((b) => b.text())).toEqual(["▶ Video track", "♪ Audio track", "♪ Music track", "♪ Narration track", "♪ SFX track"]);
@@ -436,6 +436,13 @@ describe("Timeline", () => {
     // V3 is drawn above V2
     expect(parseFloat((rows[1].element as HTMLElement).style.top)).toBeLessThan(parseFloat((rows[0].element as HTMLElement).style.top));
     expect(rows[1].findAllComponents(FreeBlock)[0].props("clip").id).toBe("hi");
+    // each overlay row has its own mute and fader
+    await w.find("button[aria-label='Mute V3 audio']").trigger("click");
+    expect(api.overlayLayerSetAudio).toHaveBeenCalledWith(1, true, 1);
+    const fader = w.find("[data-testid=fader-v2]");
+    expect(fader.attributes("title")).toBe("V2 volume 100 %");
+    await fader.setValue("0.3");
+    expect(api.overlayLayerSetAudio).toHaveBeenLastCalledWith(0, false, 0.3);
     await w.find("[data-testid=add-track]").trigger("click");
     await w.find("[data-testid=add-track-menu] button").trigger("click");
     expect(api.overlayLayerAdd).toHaveBeenCalled();
@@ -456,6 +463,71 @@ describe("Timeline", () => {
     expect(api.overlayAdd).toHaveBeenCalledWith("/videos/c.mp4", 1000, 1);
   });
 
+  describe("text track", () => {
+    const top = (w: ReturnType<typeof mount>, sel: string) => parseFloat((w.find(sel).element as HTMLElement).style.top);
+
+    it("sits above the overlay rows, + Text adds a title at the playhead, blocks show the first line", async () => {
+      const t = textClip({ id: "t1", timeline_start: 1000, duration: 2000, style: { text: "Hello\nworld", font: "Impact", size: 0.1, color: "#ff0000", backdrop: { color: "#000000", opacity: 0.5 } } });
+      const { store, w } = setup(project([clip({ id: "a" })], { texts: [t] }));
+      await w.vm.$nextTick();
+      expect(top(w, "[data-row=text]")).toBe(24 + 6);
+      expect(top(w, "[data-row='overlay:0']")).toBe(24 + 6 + 30 + 6);
+      expect(w.find("[data-testid=text-gutter]").text()).toContain("T1 · text");
+      const block = w.find("[data-testid=text-block]");
+      expect(block.text()).toBe("T Hello");
+      expect(parseFloat(block.attributes("style")!.match(/left: ([\d.]+)px/)![1])).toBeCloseTo(1000 * PX_PER_MS, 3);
+      expect(parseFloat(block.attributes("style")!.match(/width: ([\d.]+)px/)![1])).toBeCloseTo(2000 * PX_PER_MS, 3);
+      store.playhead = 3000;
+      await w.find("[data-testid=add-text]").trigger("click");
+      expect(api.textAdd).toHaveBeenCalledWith("Title", 3000);
+      // click selects; right-click offers Rename and Delete, never Merge
+      await block.trigger("pointerdown", { clientX: 200, pointerId: 1 });
+      expect(store.selected).toEqual({ kind: "text", id: "t1" });
+      await block.trigger("contextmenu", { clientX: 200, clientY: 50 });
+      const items = w.findAll("[data-testid=clip-menu] button").map((b) => b.text());
+      expect(items).toEqual(["Rename…", "Delete"]);
+      await w.find("[data-testid=clip-delete]").trigger("click");
+      expect(api.textDelete).toHaveBeenCalledWith("t1");
+    });
+
+    it("drags a title in time and trims its length from either edge", async () => {
+      const t = textClip({ id: "t1", timeline_start: 1000, duration: 2000 });
+      const { w } = setup(project([clip({ id: "a" })], { texts: [t] }));
+      await w.vm.$nextTick();
+      const scroller = w.find(".overflow-x-auto");
+      (scroller.element as HTMLElement).setPointerCapture = () => {};
+      scroller.element.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1024, height: 200, right: 1024, bottom: 200, x: 0, y: 0, toJSON() {} });
+      const block = w.find("[data-testid=text-block]");
+      await block.trigger("pointerdown", { clientX: 200, pointerId: 1 });
+      await scroller.trigger("pointermove", { clientX: 200 + 1000 * PX_PER_MS });
+      await scroller.trigger("pointerup");
+      expect(api.textMove).toHaveBeenCalledWith("t1", 2000);
+      // right edge: +500 ms
+      const handles = block.findAll(".cursor-ew-resize");
+      await handles[1].trigger("pointerdown", { clientX: 300, pointerId: 1 });
+      await scroller.trigger("pointermove", { clientX: 300 + 500 * PX_PER_MS });
+      await scroller.trigger("pointerup");
+      expect(api.textTrim).toHaveBeenCalledWith("t1", 2500);
+      expect(api.textMove).toHaveBeenCalledTimes(1);
+      // left edge: start moves and the length shrinks to keep the end
+      await handles[0].trigger("pointerdown", { clientX: 100, pointerId: 1 });
+      await scroller.trigger("pointermove", { clientX: 100 + 500 * PX_PER_MS });
+      await scroller.trigger("pointerup");
+      await flush();
+      expect(api.textTrim).toHaveBeenLastCalledWith("t1", 1500);
+      expect(api.textMove).toHaveBeenLastCalledWith("t1", 1500);
+    });
+
+    it("refuses pool drops with a banner", async () => {
+      const { store, w } = setup(project([clip({ id: "a" })]));
+      const row = w.find("[data-row=text]");
+      row.element.dispatchEvent(new CustomEvent("pooldrop", { detail: { item: poolItem({ media: stillMedia() }), clientX: 100 } }));
+      await flush();
+      expect(store.notice).toContain("only holds titles");
+      expect(api.overlayAdd).not.toHaveBeenCalled();
+    });
+  });
+
   describe("captions and highlights", () => {
     const talk = () => project([clip({ id: "a", source: "/v/a.mp4" }), clip({ id: "b", source: "/v/b.mp4", source_end: 4000 })], {
       transcripts: [{ source: "/v/a.mp4", cues: [cue(0, 2000, "So here is the thing", { id: "c1" }), cue(2500, 4500, "nobody tells you", { id: "c2" })] }],
@@ -467,20 +539,35 @@ describe("Timeline", () => {
       const { w } = setup(project([clip({ id: "a" })], { audio_tracks: [audioTrack([audioClip()])] }));
       expect(w.find("[data-row=caption]").exists()).toBe(false);
       expect(w.find("[data-testid=caption-gutter]").exists()).toBe(false);
-      expect(top(w, "[data-row^='audio:']")).toBe(24 + 6 + 44 + 6 + 78 + 6);
+      expect(top(w, "[data-row^='audio:']")).toBe(24 + 6 + 30 + 6 + 44 + 6 + 78 + 6);
     });
 
     it("lays captions out under V1 and moves the audio rows down", async () => {
       const { w } = setup(talk());
       await w.vm.$nextTick();
       expect(w.find("[data-testid=caption-gutter]").text()).toBe("CC · captions");
-      expect(top(w, "[data-row=caption]")).toBe(24 + 6 + 44 + 6 + 78 + 6);
-      expect(top(w, "[data-row^='audio:']")).toBe(24 + 6 + 44 + 6 + 78 + 6 + 22 + 6);
+      expect(top(w, "[data-row=caption]")).toBe(24 + 6 + 30 + 6 + 44 + 6 + 78 + 6);
+      expect(top(w, "[data-row^='audio:']")).toBe(24 + 6 + 30 + 6 + 44 + 6 + 78 + 6 + 22 + 6);
       const cues = w.findAll("[data-testid=cue]");
       expect(cues.map((c) => c.text())).toEqual(["So here is the thing", "nobody tells you"]);
       const st = (cues[1].element as HTMLElement).style;
       expect(parseFloat(st.left)).toBeCloseTo(2500 * PX_PER_MS, 3);
       expect(parseFloat(st.width)).toBeCloseTo(2000 * PX_PER_MS - 1, 3);
+    });
+
+    it("the CC label and the row select the captions track; off dims the row", async () => {
+      const { store, w } = setup(talk());
+      await w.vm.$nextTick();
+      await w.find("[data-testid=caption-gutter] button").trigger("click");
+      expect(store.selected).toEqual({ kind: "captions", id: "captions" });
+      expect(w.find("[data-row=caption]").classes()).toContain("ring-1");
+      store.select(null);
+      await w.find("[data-row=caption]").trigger("pointerdown", { clientX: 10 });
+      expect(store.selectedCaptions).toBe(true);
+      store.project = { ...store.project!, captions_enabled: false };
+      await w.vm.$nextTick();
+      expect(w.find("[data-row=caption]").classes()).toContain("opacity-50");
+      expect(w.find("[data-testid=caption-gutter]").text()).toBe("CC · captions · off");
     });
 
     it("marks the caption under the playhead", async () => {

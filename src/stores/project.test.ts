@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { audioClip, audioTrack, baseProject, clip, fakeSplit, media, overlay, poolItem, project, stillMedia, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, baseProject, clip, fakeSplit, media, overlay, poolItem, project, stillMedia, textClip, type MockApi } from "../test/fixtures";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -356,6 +356,8 @@ describe("mutations", () => {
     expect(api.setVideoMuted).toHaveBeenCalledWith(true);
     await s.setVideoVolume(0.3);
     expect(api.setVideoVolume).toHaveBeenCalledWith(0.3);
+    await s.setCaptionsEnabled(false);
+    expect(api.setCaptionsEnabled).toHaveBeenCalledWith(false);
     expect(api.clipTrim).toHaveBeenCalledWith("a", 100, 2000);
     expect(api.clipMove).toHaveBeenCalledWith("a", 1);
     expect(api.clipSetFades).toHaveBeenCalledWith("a", 10, 20);
@@ -369,7 +371,7 @@ describe("mutations", () => {
   it("forwards overlay, audio-track and pool edits", async () => {
     const s = useProjectStore();
     await s.load();
-    await s.overlayMove("o", 100, 1); await s.overlayLayerAdd(); await s.overlayLayerRemove(1); await s.overlayTrim("o", 0, 2000); await s.overlaySetFades("o", 1, 2);
+    await s.overlayMove("o", 100, 1); await s.overlayLayerAdd(); await s.overlayLayerRemove(1); await s.overlayTrim("o", 0, 2000); await s.overlaySetFades("o", 1, 2); await s.overlaySetAudio("o", 0.5, true); await s.overlaySetOpacity("o", 0.5); await s.overlayLayerSetAudio(1, true, 0.5);
     await s.overlaySetPlacement("o", { scale: 0.5, x: 0.1, y: 0.2 });
     await s.audioTrackAdd("SFX"); await s.audioTrackUpdate("t", "Narration", true, 0.5); await s.audioTrackRemove("t");
     await s.renameClip("c", "Intro");
@@ -381,6 +383,9 @@ describe("mutations", () => {
     expect(api.overlayLayerRemove).toHaveBeenCalledWith(1);
     expect(api.overlayTrim).toHaveBeenCalledWith("o", 0, 2000);
     expect(api.overlaySetFades).toHaveBeenCalledWith("o", 1, 2);
+    expect(api.overlaySetAudio).toHaveBeenCalledWith("o", 0.5, true);
+    expect(api.overlaySetOpacity).toHaveBeenCalledWith("o", 0.5);
+    expect(api.overlayLayerSetAudio).toHaveBeenCalledWith(1, true, 0.5);
     expect(api.overlaySetPlacement).toHaveBeenCalledWith("o", { scale: 0.5, x: 0.1, y: 0.2 });
     expect(api.audioTrackAdd).toHaveBeenCalledWith("SFX");
     expect(api.audioTrackUpdate).toHaveBeenCalledWith("t", "Narration", true, 0.5);
@@ -463,6 +468,51 @@ describe("mutations", () => {
     s.select("a");
     await s.deleteSelected();
     expect(api.clipDelete).toHaveBeenCalledWith("a");
+  });
+
+  it("text track: add selects the title, edits forward, ⌘T/⌫ dispatch on it, rasters cover titles inside V1 only", async () => {
+    const s = useProjectStore();
+    const p = project([clip({ id: "a" })]);
+    api.projectGet.mockImplementationOnce(() => Promise.resolve(p));
+    await s.load();
+    const t1 = textClip({ id: "t1", timeline_start: 1000, duration: 2000, fade_in: 500 });
+    api.textAdd.mockImplementationOnce(() => Promise.resolve({ ...p, texts: [t1] }));
+    await s.textAdd(1000);
+    expect(api.textAdd).toHaveBeenCalledWith("Title", 1000);
+    expect(s.selected).toEqual({ kind: "text", id: "t1" });
+    expect(s.selectedText?.id).toBe("t1");
+    expect(api.cacheThumbnails).toHaveBeenCalledTimes(1); // only the V1 clip: titles have no media
+    s.playhead = 1250;
+    expect(s.currentTexts).toEqual([{ clip: t1, opacity: 0.5 }]);
+    s.playhead = 3500;
+    expect(s.currentTexts).toEqual([]);
+    for (const k of ["textMove", "textTrim", "textSetFades", "textSetPosition", "textSetStyle"] as const) api[k].mockImplementation(() => Promise.resolve({ ...p, texts: [t1] }));
+    await s.textMove("t1", 5);
+    await s.textTrim("t1", 3000);
+    await s.textSetFades("t1", 1, 2);
+    await s.textSetPosition("t1", 0.1, 0.2);
+    await s.textSetStyle("t1", { ...t1.style, color: "#ff0000" });
+    expect(api.textMove).toHaveBeenCalledWith("t1", 5);
+    expect(api.textTrim).toHaveBeenCalledWith("t1", 3000);
+    expect(api.textSetFades).toHaveBeenCalledWith("t1", 1, 2);
+    expect(api.textSetPosition).toHaveBeenCalledWith("t1", 0.1, 0.2);
+    expect(api.textSetStyle).toHaveBeenCalledWith("t1", expect.objectContaining({ color: "#ff0000" }));
+    s.playhead = 2000;
+    s.select({ kind: "text", id: "t1" });
+    api.textSplit.mockImplementationOnce(() => Promise.resolve({ project: { ...p, texts: [{ ...t1, duration: 1000 }, textClip({ id: "t2", timeline_start: 2000, duration: 1000 })] }, new_id: "t2" }));
+    await s.splitAtPlayhead();
+    expect(api.textSplit).toHaveBeenCalledWith("t1", 2000);
+    expect(s.selected).toEqual({ kind: "text", id: "t2" });
+    await s.deleteSelected();
+    expect(api.textDelete).toHaveBeenCalledWith("t2");
+    // fonts load once
+    await s.loadFonts(); await s.loadFonts();
+    expect(api.systemFonts).toHaveBeenCalledTimes(1);
+    expect(s.fonts).toContain("Impact");
+    // rasters: one per title that starts inside V1 (5 s), at the requested size
+    s.project = { ...p, texts: [t1, textClip({ id: "late", timeline_start: 9000 })] };
+    const r = s.textRasters(1080, 1920);
+    expect(r).toEqual([{ id: "t1", png: "iVBORw0KGgo=" }]);
   });
 
   it("poolView and timelineHeight persist to localStorage", async () => {

@@ -49,7 +49,10 @@ async function start() {
   if (!destination.value) return;
   error.value = null; result.value = null; progress.value = 0; startedAt.value = Date.now(); elapsed.value = 0;
   store.playing = false;
-  try { jobId.value = await api.exportStart(settings.value); } catch (e) { error.value = String(e); }
+  // Titles are rasterised here, at the output size, so the export draws exactly what the preview showed.
+  const [w, h] = plan.value?.output ?? [0, 0];
+  const texts = audioOnly.value || !w ? [] : store.textRasters(w, h);
+  try { jobId.value = await api.exportStart(settings.value, texts); } catch (e) { error.value = String(e); }
 }
 async function cancel() { if (jobId.value) await api.jobCancel(jobId.value); }
 function close() { if (!jobId.value) { result.value = null; error.value = null; emit("close"); } }

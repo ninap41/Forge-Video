@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTitle }
 import App from "./App.vue";
 import { useProjectStore } from "./stores/project";
 import { SHORTCUTS } from "./components/HelpDialog.vue";
+import { WELCOME_KEY } from "./components/WelcomeDialog.vue";
 import ClipBlock from "./components/ClipBlock.vue";
 
 const base = baseProject();
@@ -45,6 +46,7 @@ beforeEach(() => {
   api.ffmpegStatus.mockImplementation(() => Promise.resolve({ ffmpeg: "/x/ffmpeg", ffprobe: "/x/ffprobe" }));
   Object.values(dialog).forEach((d) => d.mockReset());
   setTitle.mockClear(); unlistenDrop.mockClear(); dropHandler = undefined;
+  localStorage.setItem(WELCOME_KEY, "1"); // every suite but "first launch" is past the welcome dialog
 });
 
 describe("App shell", () => {
@@ -232,6 +234,18 @@ describe("keyboard shortcuts", () => {
     key({ key: "t", ctrlKey: true });
     await flush();
     expect(store.clips).toHaveLength(4);
+    // ⌘J joins the highlighted pieces; with one clip selected it does nothing
+    key({ key: "j", metaKey: true });
+    await flush();
+    expect(api.clipMerge).not.toHaveBeenCalled();
+    store.select({ kind: "clip", id: "a" });
+    store.select({ kind: "clip", id: "a-split" }, true);
+    api.clipMerge.mockResolvedValueOnce({ project: { ...store.project!, clips: store.clips.filter((c) => c.id !== "a-split") }, new_id: "a" });
+    key({ key: "j", metaKey: true });
+    await flush();
+    expect(api.clipMerge).toHaveBeenCalledWith(["a", "a-split"]);
+    expect(store.clips.map((c) => c.id)).toEqual(["a", "b", "b-split"]);
+    expect(store.selectedClipId).toBe("a");
     key({ key: "s", metaKey: true });
     await flush();
     expect(api.projectSave).toHaveBeenCalled();
@@ -385,5 +399,32 @@ describe("AI mode", () => {
     await flush();
     expect(api.projectOpen).toHaveBeenCalledWith("/videos/Test - The hook.forgevideo");
     expect(store.dirty).toBe(false);
+  });
+});
+
+describe("first launch", () => {
+  it("shows the welcome dialog once, then remembers that it was dismissed", async () => {
+    localStorage.removeItem(WELCOME_KEY);
+    const { w, store } = await setup();
+    const dlg = w.find("[data-testid=welcome]");
+    expect(dlg.exists()).toBe(true);
+    expect(api.aiStatus).toHaveBeenCalled();
+    key({ code: "Space" });
+    expect(store.playing).toBe(false); // shortcuts wait until the dialog is gone
+    await btn(w, "Start editing").trigger("click");
+    expect(w.find("[data-testid=welcome]").exists()).toBe(false);
+    expect(localStorage.getItem(WELCOME_KEY)).toBe("1");
+    mounted.splice(0).forEach((m) => m.unmount());
+    const again = await setup();
+    expect(again.w.find("[data-testid=welcome]").exists()).toBe(false);
+  });
+
+  it("offers Skip for now when there is no Claude account yet", async () => {
+    localStorage.removeItem(WELCOME_KEY);
+    api.aiStatus.mockImplementation(() => Promise.resolve({ whisper: null, model: null, model_path: "/m", claude: null, account: null }));
+    const { w } = await setup();
+    await btn(w, "Skip for now").trigger("click");
+    expect(w.find("[data-testid=welcome]").exists()).toBe(false);
+    expect(localStorage.getItem(WELCOME_KEY)).toBe("1");
   });
 });

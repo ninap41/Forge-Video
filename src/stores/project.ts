@@ -3,16 +3,20 @@ import { ref, computed, watch } from "vue";
 import { api } from "../api/tauri";
 import { timelineCues, transcriptText, cueAt } from "../utils/captions";
 import { basename } from "../utils/time";
+import { rasterBase64, rasterText } from "../utils/textRaster";
 import {
-  type AiStatus, type AspectPreset, type AudioClip, type AudioTrack, type Crop, type MediaInfo, type Ms, type OverlayClip,
-  type Placement, type PoolItem, type Project, type Transition,
-  clipDuration, clipEnd, mediaKind, projectDuration,
+  type AiStatus, type AspectPreset, type AudioClip, type AudioTrack, type Crop, type LayerAudio, type MediaInfo, type Ms, type OverlayClip,
+  type Placement, type PoolItem, type Project, type TextClip, type TextRaster, type TextStyle, type Transition,
+  LAYER_AUDIO_DEFAULT, clipDuration, clipEnd, mediaKind, projectDuration, textEnd,
 } from "../types/project";
 
 export interface Thumbs { intervalMs: number; urls: string[] }
 
 /** What the user has selected: a V1 clip, an overlay, or an audio clip (with its track). */
-export type Selection = { kind: "clip"; id: string } | { kind: "overlay"; id: string } | { kind: "audio"; id: string; trackId: string };
+export type Selection =
+  | { kind: "clip"; id: string } | { kind: "overlay"; id: string } | { kind: "audio"; id: string; trackId: string }
+  | { kind: "text"; id: string } | { kind: "captions"; id: "captions" };
+export const CAPTIONS_SELECTION: Selection = { kind: "captions", id: "captions" };
 
 export type PoolView = "grid" | "list";
 
@@ -59,6 +63,7 @@ export const useProjectStore = defineStore("project", () => {
   const clips = computed(() => project.value?.clips ?? []);
   const overlays = computed(() => project.value?.overlays ?? []);
   const audioTracks = computed(() => project.value?.audio_tracks ?? []);
+  const texts = computed(() => project.value?.texts ?? []);
   const pool = computed(() => project.value?.pool ?? []);
   const duration = computed(() => (project.value ? projectDuration(project.value) : 0));
 
@@ -70,6 +75,7 @@ export const useProjectStore = defineStore("project", () => {
   const selectedClip = computed(() => clips.value.find((c) => c.id === selectedClipId.value) ?? null);
   const selectedIndex = computed(() => clips.value.findIndex((c) => c.id === selectedClipId.value));
   const selectedOverlay = computed(() => (selected.value?.kind === "overlay" ? overlays.value.find((o) => o.id === selected.value!.id) ?? null : null));
+  const selectedText = computed(() => (selected.value?.kind === "text" ? texts.value.find((t) => t.id === selected.value!.id) ?? null : null));
   const selectedAudio = computed<{ clip: AudioClip; track: AudioTrack } | null>(() => {
     const s = selected.value; if (s?.kind !== "audio") return null;
     const track = audioTracks.value.find((t) => t.id === s.trackId); if (!track) return null;
@@ -89,11 +95,35 @@ export const useProjectStore = defineStore("project", () => {
     return null;
   });
   /** Overlays under the playhead, lowest layer first; mirrors timeline::locate_overlays. */
-  const currentOverlays = computed<{ clip: OverlayClip; sourceMs: Ms }[]>(() => {
-    const t = playhead.value;
-    return overlays.value.filter((o) => t >= o.timeline_start && t < clipEnd(o)).map((o) => ({ clip: o, sourceMs: o.source_start + (t - o.timeline_start) }));
-  });
   const overlayLayers = computed(() => Math.max(1, project.value?.overlay_layers ?? 1));
+  /** Mute / fader of an overlay row; rows a file predates read as on at 100 %. */
+  const layerAudio = (layer: number): LayerAudio => project.value?.overlay_audio?.[layer] ?? LAYER_AUDIO_DEFAULT;
+  /** Overlays under the playhead, with what the preview should play them at (0 = silent). */
+  const currentOverlays = computed<{ clip: OverlayClip; sourceMs: Ms; gain: number }[]>(() => {
+    const t = playhead.value;
+    return overlays.value.filter((o) => t >= o.timeline_start && t < clipEnd(o)).map((o) => {
+      const row = layerAudio(o.layer);
+      const silent = !o.media.has_audio || o.media.is_still || o.muted || row.muted;
+      return { clip: o, sourceMs: o.source_start + (t - o.timeline_start), gain: silent ? 0 : Math.min(1, o.volume * row.volume) };
+    });
+  });
+  /** Titles under the playhead with their fade opacity; mirrors timeline::locate_texts. */
+  const currentTexts = computed<{ clip: TextClip; opacity: number }[]>(() => {
+    const t = playhead.value;
+    return texts.value.filter((x) => t >= x.timeline_start && t < textEnd(x)).map((x) => {
+      const off = t - x.timeline_start;
+      const fi = x.fade_in > 0 ? Math.min(1, off / x.fade_in) : 1;
+      const fo = x.fade_out > 0 ? Math.min(1, (x.duration - off) / x.fade_out) : 1;
+      return { clip: x, opacity: Math.max(0, Math.min(fi, fo)) };
+    });
+  });
+  /** Font families for the Inspector's picker; fetched once, on first use. */
+  const fonts = ref<string[]>([]);
+  let fontsLoading: Promise<void> | null = null;
+  function loadFonts() {
+    fontsLoading ??= api.systemFonts().then((f) => { fonts.value = f; }).catch((e) => { console.warn("fonts", e); fontsLoading = null; });
+    return fontsLoading;
+  }
   /** Every audio clip that covers the playhead, with mute resolved against its track. */
   const activeAudioClips = computed<{ clip: AudioClip; track: AudioTrack; sourceMs: Ms; silent: boolean }[]>(() => {
     const t = playhead.value;
@@ -108,7 +138,10 @@ export const useProjectStore = defineStore("project", () => {
 
   // ---- AI mode ----
   const cues = computed(() => (project.value ? timelineCues(project.value) : []));
-  const currentCue = computed(() => cueAt(cues.value, playhead.value));
+  const captionsEnabled = computed(() => project.value?.captions_enabled ?? true);
+  const selectedCaptions = computed(() => selected.value?.kind === "captions");
+  /** The caption to draw in the preview: none while the captions track is off. */
+  const currentCue = computed(() => (captionsEnabled.value ? cueAt(cues.value, playhead.value) : null));
   const highlights = computed(() => project.value?.highlights ?? []);
   const aiStatus = ref<AiStatus | null>(null);
   const aiJob = ref<AiJob | null>(null);
@@ -140,6 +173,8 @@ export const useProjectStore = defineStore("project", () => {
     if (!s) return false;
     if (s.kind === "clip") return p.clips.some((c) => c.id === s.id);
     if (s.kind === "overlay") return p.overlays.some((o) => o.id === s.id);
+    if (s.kind === "captions") return timelineCues(p).length > 0;
+    if (s.kind === "text") return p.texts.some((t) => t.id === s.id);
     return p.audio_tracks.some((t) => t.id === s.trackId && t.clips.some((c) => c.id === s.id));
   }
 
@@ -229,7 +264,8 @@ export const useProjectStore = defineStore("project", () => {
   }
 
   return {
-    cues, currentCue, highlights, aiStatus, aiJob, aiError, aiSigningIn, aiInstalling,
+    cues, currentCue, captionsEnabled, selectedCaptions, highlights, aiStatus, aiJob, aiError, aiSigningIn, aiInstalling,
+    async setCaptionsEnabled(enabled: boolean) { await edit("captions", () => api.setCaptionsEnabled(enabled)); },
     /** Copy the timeline transcript as plain text; a banner confirms or explains. */
     async copyTranscript() {
       const text = transcriptText(cues.value);
@@ -275,8 +311,8 @@ export const useProjectStore = defineStore("project", () => {
       }
     },
 
-    project, clips, overlays, audioTracks, pool, duration, selected, selectedAll, selectedClipId, selectedClip, selectedIndex, selectedOverlay, selectedAudio,
-    playhead, playing, dirty, error, thumbs, waveforms, busy, current, currentOverlays, overlayLayers, activeAudioClips, poolDrag, poolView, timelineHeight, notice, notify,
+    project, clips, overlays, texts, audioTracks, pool, duration, selected, selectedAll, selectedClipId, selectedClip, selectedIndex, selectedOverlay, selectedText, selectedAudio,
+    playhead, playing, dirty, error, thumbs, waveforms, busy, current, currentOverlays, currentTexts, fonts, overlayLayers, layerAudio, activeAudioClips, poolDrag, poolView, timelineHeight, notice, notify,
 
     async load() { const p = await api.projectGet(); apply(p, false); cacheAll(p); },
     async newProject() { apply(await api.projectNew("Untitled"), false); dirty.value = false; playhead.value = 0; },
@@ -321,6 +357,7 @@ export const useProjectStore = defineStore("project", () => {
       const inside = (c: { timeline_start: Ms; source_start: Ms; source_end: Ms }) => at > c.timeline_start && at < clipEnd(c);
       const target: Selection | null =
         s?.kind === "overlay" && selectedOverlay.value && inside(selectedOverlay.value) ? s
+        : s?.kind === "text" && selectedText.value && at > selectedText.value.timeline_start && at < textEnd(selectedText.value) ? s
         : s?.kind === "audio" && selectedAudio.value && inside(selectedAudio.value.clip) ? s
         : current.value && inside(current.value.clip) ? { kind: "clip", id: current.value.clip.id }
         : null;
@@ -330,11 +367,12 @@ export const useProjectStore = defineStore("project", () => {
       }
       const res = await run("split", () =>
         target.kind === "overlay" ? api.overlaySplit(target.id, at)
+        : target.kind === "text" ? api.textSplit(target.id, at)
         : target.kind === "audio" ? api.audioClipSplit(target.id, at)
         : api.clipSplit(target.id, at));
       if (!res) return;
       apply(res.project);
-      const next: Selection = target.kind === "audio" ? { kind: "audio", id: res.new_id, trackId: target.trackId } : { kind: target.kind, id: res.new_id };
+      const next: Selection = target.kind === "audio" ? { kind: "audio", id: res.new_id, trackId: target.trackId } : { kind: target.kind as "clip" | "overlay" | "text", id: res.new_id };
       selected.value = stillSelected(res.project, next) ? next : null;
     },
     async deleteClip(id: string) { await edit("delete", () => api.clipDelete(id)); },
@@ -343,7 +381,9 @@ export const useProjectStore = defineStore("project", () => {
       const s = selected.value; if (!s) return;
       if (s.kind === "clip") await edit("delete", () => api.clipDelete(s.id));
       else if (s.kind === "overlay") await edit("delete", () => api.overlayDelete(s.id));
-      else await edit("delete", () => api.audioClipDelete(s.id));
+      else if (s.kind === "audio") await edit("delete", () => api.audioClipDelete(s.id));
+      else if (s.kind === "text") await edit("delete", () => api.textDelete(s.id));
+      // the captions track cannot be deleted, only switched off
     },
     async moveClip(id: string, to: number) { await edit("move", () => api.clipMove(id, to)); },
     async setFades(id: string, fi: Ms, fo: Ms) { await edit("fades", () => api.clipSetFades(id, fi, fo)); },
@@ -372,7 +412,30 @@ export const useProjectStore = defineStore("project", () => {
     async overlayLayerRemove(layer: number) { await edit("layer", () => api.overlayLayerRemove(layer)); },
     async overlayTrim(id: string, s: Ms, e: Ms) { await edit("trim", () => api.overlayTrim(id, s, e)); },
     async overlaySetFades(id: string, fi: Ms, fo: Ms) { await edit("fades", () => api.overlaySetFades(id, fi, fo)); },
+    async overlaySetOpacity(id: string, opacity: number) { await edit("opacity", () => api.overlaySetOpacity(id, opacity)); },
+    async overlaySetAudio(id: string, volume: number, muted: boolean) { await edit("volume", () => api.overlaySetAudio(id, volume, muted)); },
+    async overlayLayerSetAudio(layer: number, muted: boolean, volume: number) { await edit("layer", () => api.overlayLayerSetAudio(layer, muted, volume)); },
     async overlaySetPlacement(id: string, p: Placement) { await edit("placement", () => api.overlaySetPlacement(id, p)); },
+
+    /** + Text: a "Title" at `at`, selected so the Inspector opens on it. */
+    async textAdd(at: Ms, text = "Title") {
+      const before = new Set(texts.value.map((t) => t.id));
+      if (await edit("text", () => api.textAdd(text, at))) {
+        const t = texts.value.find((t) => !before.has(t.id));
+        if (t) selected.value = { kind: "text", id: t.id };
+      }
+    },
+    async textMove(id: string, at: Ms) { await edit("move", () => api.textMove(id, at)); },
+    async textDelete(id: string) { await edit("delete", () => api.textDelete(id)); },
+    async textTrim(id: string, duration: Ms) { await edit("trim", () => api.textTrim(id, duration)); },
+    async textSetFades(id: string, fi: Ms, fo: Ms) { await edit("fades", () => api.textSetFades(id, fi, fo)); },
+    async textSetPosition(id: string, x: number, y: number) { await edit("position", () => api.textSetPosition(id, x, y)); },
+    async textSetStyle(id: string, style: TextStyle) { await edit("style", () => api.textSetStyle(id, style)); },
+    loadFonts,
+    /** One PNG per title inside V1, drawn at the output size, for `export_start`. */
+    textRasters(w: number, h: number): TextRaster[] {
+      return texts.value.filter((t) => t.timeline_start < duration.value).map((t) => ({ id: t.id, png: rasterBase64(rasterText(t.style, w, h)) }));
+    },
 
     async audioTrackAdd(label: string) { await edit("track", () => api.audioTrackAdd(label)); },
     async audioTrackUpdate(id: string, label: string, muted: boolean, volume: number) { await edit("track", () => api.audioTrackUpdate(id, label, muted, volume)); },
@@ -404,7 +467,7 @@ export const useProjectStore = defineStore("project", () => {
       extraSelected.value = [];
       selected.value = next;
     },
-    /** Right-click → Merge: joins the selected pieces (all one row) back into one clip and selects it. */
+    /** ⌘J / right-click → Merge: joins the selected pieces (all one row) back into one clip and selects it. */
     async mergeSelected() {
       const ids = selectedAll.value.map((s) => s.id);
       if (ids.length < 2) return;
@@ -412,7 +475,7 @@ export const useProjectStore = defineStore("project", () => {
       const res = await run("merge", () => api.clipMerge(ids));
       if (!res) return;
       apply(res.project);
-      const next: Selection = kind.kind === "audio" ? { kind: "audio", id: res.new_id, trackId: kind.trackId } : { kind: kind.kind, id: res.new_id };
+      const next: Selection = kind.kind === "audio" ? { kind: "audio", id: res.new_id, trackId: kind.trackId } : { kind: kind.kind as "clip" | "overlay", id: res.new_id };
       selected.value = stillSelected(res.project, next) ? next : null;
       extraSelected.value = [];
     },

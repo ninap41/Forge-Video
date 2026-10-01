@@ -4,10 +4,10 @@
 use crate::error::{Error, Result};
 use crate::jobs::{JobDone, JobError, JobProgress, EVT_DONE, EVT_ERROR, EVT_PROGRESS};
 use crate::ai::{self, Cancel};
-use crate::project::{AspectPreset, AudioClip, Clip, Crop, MediaInfo, MediaKind, Ms, OverlayClip, Placement, PoolItem, Project, Transcript, Transition};
+use crate::project::{AspectPreset, AudioClip, Clip, Crop, MediaInfo, MediaKind, Ms, OverlayClip, Placement, PoolItem, Project, TextClip, TextStyle, Transcript, Transition};
 use crate::render::{ExportPlan, ExportSettings};
 use crate::{timeline, AppState};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -76,6 +76,13 @@ pub fn project_save(state: S, path: Option<PathBuf>) -> Result<PathBuf> {
 #[tauri::command]
 pub fn project_set_aspect(state: S, aspect: AspectPreset) -> Project {
     state.project.lock().unwrap().aspect = aspect;
+    snapshot(&state)
+}
+
+/// The captions track switch: see `Project::captions_enabled`.
+#[tauri::command]
+pub fn project_set_captions_enabled(state: S, enabled: bool) -> Project {
+    state.project.lock().unwrap().captions_enabled = enabled;
     snapshot(&state)
 }
 
@@ -198,6 +205,27 @@ pub fn overlay_layer_add(state: S) -> Project {
     snapshot(&state)
 }
 
+/// Mute / 0–1 fader for one overlay row (V2 = 0).
+#[tauri::command]
+pub fn overlay_layer_set_audio(state: S, layer: u32, muted: bool, volume: f32) -> Result<Project> {
+    with_project(&state, |p| timeline::overlay_layer_set_audio(p, layer, muted, volume))?;
+    Ok(snapshot(&state))
+}
+
+/// Constant opacity (0–1) for one overlay clip.
+#[tauri::command]
+pub fn overlay_set_opacity(state: S, id: Uuid, opacity: f32) -> Result<Project> {
+    with_project(&state, |p| timeline::overlay_set_opacity(p, id, opacity))?;
+    Ok(snapshot(&state))
+}
+
+/// Volume (0–2) and mute for one overlay clip.
+#[tauri::command]
+pub fn overlay_set_audio(state: S, id: Uuid, volume: f32, muted: bool) -> Result<Project> {
+    with_project(&state, |p| timeline::overlay_set_audio(p, id, volume, muted))?;
+    Ok(snapshot(&state))
+}
+
 #[tauri::command]
 pub fn overlay_layer_remove(state: S, layer: u32) -> Result<Project> {
     with_project(&state, |p| timeline::overlay_layer_remove(p, layer))?;
@@ -232,6 +260,62 @@ pub fn overlay_set_fades(state: S, id: Uuid, fade_in: Ms, fade_out: Ms) -> Resul
 pub fn overlay_set_placement(state: S, id: Uuid, placement: Placement) -> Result<Project> {
     with_project(&state, |p| timeline::overlay_set_placement(p, id, placement))?;
     Ok(snapshot(&state))
+}
+
+// ---------- Text track (T1) ----------
+
+#[tauri::command]
+pub fn text_add(state: S, text: String, at: Ms) -> Project {
+    timeline::text_add(&mut state.project.lock().unwrap(), TextClip::new(text), at);
+    snapshot(&state)
+}
+
+#[tauri::command]
+pub fn text_move(state: S, id: Uuid, at: Ms) -> Result<Project> {
+    with_project(&state, |p| timeline::text_move(p, id, at))?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
+pub fn text_trim(state: S, id: Uuid, duration: Ms) -> Result<Project> {
+    with_project(&state, |p| timeline::text_trim(p, id, duration))?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
+pub fn text_split(state: S, id: Uuid, at: Ms) -> Result<SplitResult> {
+    let new_id = with_project(&state, |p| timeline::text_split(p, id, at))?;
+    Ok(SplitResult { project: snapshot(&state), new_id })
+}
+
+#[tauri::command]
+pub fn text_delete(state: S, id: Uuid) -> Result<Project> {
+    with_project(&state, |p| timeline::text_delete(p, id))?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
+pub fn text_set_fades(state: S, id: Uuid, fade_in: Ms, fade_out: Ms) -> Result<Project> {
+    with_project(&state, |p| timeline::text_set_fades(p, id, fade_in, fade_out))?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
+pub fn text_set_position(state: S, id: Uuid, x: f32, y: f32) -> Result<Project> {
+    with_project(&state, |p| timeline::text_set_position(p, id, x, y))?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
+pub fn text_set_style(state: S, id: Uuid, style: TextStyle) -> Result<Project> {
+    with_project(&state, |p| timeline::text_set_style(p, id, style))?;
+    Ok(snapshot(&state))
+}
+
+/// Font families for the text track's picker; runs `fc-list`, so off the main thread.
+#[tauri::command]
+pub async fn system_fonts() -> Vec<String> {
+    tokio::task::spawn_blocking(crate::render::fonts::system_fonts).await.unwrap_or_default()
 }
 
 // ---------- Audio tracks ----------
@@ -397,10 +481,50 @@ pub fn export_plan(state: S, settings: ExportSettings) -> Result<ExportPlan> {
     crate::render::plan(&state.project.lock().unwrap(), &settings)
 }
 
+/// One title rasterised by the webview at output size: base64 PNG bytes, no `data:` prefix.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TextRaster {
+    pub id: Uuid,
+    pub png: String,
+}
+
+/// Write the rasters to a temp dir for this export; every title inside the V1 span must have one.
+fn write_text_rasters(p: &Project, texts: &[TextRaster], job_id: Uuid) -> Result<(Option<PathBuf>, Vec<crate::render::graph::TextRaster>)> {
+    use base64::Engine;
+    let v1_len = p.duration_ms();
+    let needed: Vec<Uuid> = p.texts.iter().filter(|t| t.timeline_start < v1_len).map(|t| t.id).collect();
+    if needed.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+    if let Some(missing) = needed.iter().find(|id| !texts.iter().any(|r| r.id == **id)) {
+        return Err(Error::InvalidEdit(format!("text clip {missing} was not rendered")));
+    }
+    let dir = std::env::temp_dir().join(format!("forgevideo-{job_id}"));
+    std::fs::create_dir_all(&dir)?;
+    let mut out = Vec::new();
+    for r in texts.iter().filter(|r| needed.contains(&r.id)) {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(r.png.trim())
+            .map_err(|e| Error::InvalidEdit(format!("bad text raster: {e}")))?;
+        let path = dir.join(format!("{}.png", r.id));
+        std::fs::write(&path, bytes)?;
+        out.push((r.id, path));
+    }
+    Ok((Some(dir), out))
+}
+
 #[tauri::command]
-pub async fn export_start(app: AppHandle, state: S<'_>, settings: ExportSettings) -> Result<Uuid> {
-    let (plan, cues) = with_project(&state, |p| Ok((crate::render::plan(p, &settings)?, ai::captions::timeline_cues(p))))?;
+pub async fn export_start(app: AppHandle, state: S<'_>, settings: ExportSettings, texts: Vec<TextRaster>) -> Result<Uuid> {
     let (job_id, cancel) = state.jobs.register();
+    let planned = with_project(&state, |p| {
+        let (dir, rasters) = write_text_rasters(p, &texts, job_id)?;
+        let plan = crate::render::plan_with_texts(p, &settings, &rasters);
+        if plan.is_err() { if let Some(d) = &dir { let _ = std::fs::remove_dir_all(d); } }
+        Ok((plan?, export_cues(p), dir))
+    });
+    let (plan, cues, raster_dir) = match planned {
+        Ok(v) => v,
+        Err(e) => { state.jobs.finish(job_id); return Err(e); }
+    };
     let kind = "export".to_string();
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -416,6 +540,7 @@ pub async fn export_start(app: AppHandle, state: S<'_>, settings: ExportSettings
         .await;
         let st: State<AppState> = app.state();
         st.jobs.finish(job_id);
+        if let Some(d) = raster_dir { let _ = std::fs::remove_dir_all(d); }
         match res {
             Ok(()) => {
                 let captions = write_srt(&plan.destination, &cues);
@@ -449,6 +574,11 @@ pub fn ffmpeg_status() -> FfmpegStatus {
 // ---------- AI mode ----------
 
 /// Captions travel beside the export as `<name>.srt`. `None` when there are none or it cannot be written.
+/// What the `.srt` gets: the timeline cues, or nothing while the captions track is switched off.
+fn export_cues(p: &Project) -> Vec<crate::project::Cue> {
+    if p.captions_enabled { ai::captions::timeline_cues(p) } else { Vec::new() }
+}
+
 fn write_srt(destination: &Path, cues: &[crate::project::Cue]) -> Option<PathBuf> {
     if cues.is_empty() {
         return None;
@@ -839,6 +969,46 @@ mod tests {
         assert!(!same_file(Path::new("/definitely/missing/a"), Path::new("/definitely/missing/b")));
     }
 
+    #[test]
+    fn text_track_commands_and_raster_staging() {
+        let app = app();
+        let st = app.state::<AppState>();
+        let p = text_add(st.clone(), "Hello".into(), 1000);
+        assert_eq!(p.texts.len(), 1);
+        let id = p.texts[0].id;
+        assert_eq!((p.texts[0].timeline_start, p.texts[0].duration, p.texts[0].style.text.as_str()), (1000, 5000, "Hello"));
+        assert_eq!(text_trim(st.clone(), id, 2000).unwrap().texts[0].duration, 2000);
+        assert_eq!(text_move(st.clone(), id, 500).unwrap().texts[0].timeline_start, 500);
+        let p = text_set_fades(st.clone(), id, 100, 200).unwrap();
+        assert_eq!((p.texts[0].fade_in, p.texts[0].fade_out), (100, 200));
+        let p = text_set_position(st.clone(), id, 0.2, 0.3).unwrap();
+        assert_eq!((p.texts[0].x, p.texts[0].y), (0.2, 0.3));
+        let style = TextStyle { text: "Big".into(), font: "Impact".into(), size: 0.2, color: "#ff0000".into(), backdrop: Some(crate::project::Backdrop { color: "#000000".into(), opacity: 0.5 }) };
+        let p = text_set_style(st.clone(), id, style.clone()).unwrap();
+        assert_eq!(p.texts[0].style, style);
+        let r = text_split(st.clone(), id, 1500).unwrap();
+        assert_eq!(r.project.texts.len(), 2);
+        assert_eq!(text_delete(st.clone(), r.new_id).unwrap().texts.len(), 1);
+        assert!(text_delete(st.clone(), r.new_id).is_err());
+
+        // raster staging: a title inside V1 needs a PNG; titles past the end do not
+        let mut p = project_get(st.clone());
+        let mi = MediaInfo { duration_ms: 3000, width: 1280, height: 720, fps: crate::project::Rational { num: 30, den: 1 }, codec: "h264".into(), container: "mov".into(), has_audio: true, audio_codec: Some("aac".into()), sample_rate: Some(48000), rotation: 0, is_still: false };
+        let c = Clip::new(fx("clip_a_720p.mp4"), mi);
+        timeline::append(&mut p, c);
+        let job = Uuid::new_v4();
+        assert!(write_text_rasters(&p, &[], job).is_err(), "missing raster is refused");
+        let png = std::fs::read(fx("logo.png")).unwrap();
+        let b64 = { use base64::Engine; base64::engine::general_purpose::STANDARD.encode(&png) };
+        assert!(write_text_rasters(&p, &[TextRaster { id, png: "not base64!".into() }], job).is_err());
+        let (dir, rasters) = write_text_rasters(&p, &[TextRaster { id, png: b64 }], job).unwrap();
+        assert_eq!(rasters.len(), 1);
+        assert_eq!(std::fs::read(&rasters[0].1).unwrap(), png);
+        std::fs::remove_dir_all(dir.unwrap()).unwrap();
+        timeline::text_move(&mut p, id, 10_000).unwrap();
+        assert_eq!(write_text_rasters(&p, &[], job).unwrap(), (None, Vec::new()), "no titles in V1: nothing staged");
+    }
+
     #[tokio::test]
     async fn overlay_and_audio_track_commands() {
         let app = app();
@@ -885,6 +1055,15 @@ mod tests {
         let p = clip_rename(st.clone(), p.clips[0].id, "".into()).unwrap();
         assert_eq!(p.clips[0].name, None);
         assert!(clip_rename(st.clone(), Uuid::new_v4(), "x".into()).is_err());
+        let ov = overlay_add(st.clone(), fx("clip_b_1080p.mp4"), 0, 0).await.unwrap();
+        let oid = ov.overlays[0].id;
+        let p = overlay_set_opacity(st.clone(), oid, 0.25).unwrap();
+        assert_eq!(p.overlays[0].opacity, 0.25);
+        let p = overlay_set_audio(st.clone(), oid, 0.6, true).unwrap();
+        assert_eq!((p.overlays[0].volume, p.overlays[0].muted), (0.6, true));
+        let p = overlay_layer_set_audio(st.clone(), 0, true, 0.3).unwrap();
+        assert_eq!((p.overlay_audio[0].muted, p.overlay_audio[0].volume), (true, 0.3));
+        assert!(overlay_layer_set_audio(st.clone(), 9, false, 1.0).is_err());
         let p = audio_track_update(st.clone(), t, "Bed".into(), true, 0.5).unwrap();
         assert_eq!((p.audio_tracks[0].label.as_str(), p.audio_tracks[0].muted, p.audio_tracks[0].volume), ("Bed", true, 0.5));
         let p = audio_track_add(st.clone(), "SFX".into());
@@ -1058,7 +1237,11 @@ mod tests {
         let dest = dir.path().join("out.mp4");
         assert_eq!(write_srt(&dest, &[]), None);
         with_captions(&st);
-        let cues = ai::captions::timeline_cues(&project_get(st));
+        let cues = export_cues(&project_get(st.clone()));
+        assert_eq!(cues.len(), ai::captions::timeline_cues(&project_get(st.clone())).len());
+        assert!(!project_set_captions_enabled(st.clone(), false).captions_enabled);
+        assert!(export_cues(&project_get(st.clone())).is_empty(), "captions off: nothing reaches the .srt");
+        assert!(project_set_captions_enabled(st.clone(), true).captions_enabled);
         assert_eq!(write_srt(&dest, &cues), Some(dir.path().join("out.srt")));
         assert!(std::fs::read_to_string(dir.path().join("out.srt")).unwrap().starts_with("1\n00:00:00,000 --> 00:00:01,500\nSo here is the thing\n"));
         assert_eq!(write_srt(&dir.path().join("missing/out.mp4"), &cues), None);

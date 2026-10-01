@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { clip, project, type MockApi } from "../test/fixtures";
+import { clip, project, textClip, type MockApi } from "../test/fixtures";
 import type { JobDone, JobError, JobProgress } from "../types/project";
 
 vi.mock("../api/tauri", async () => {
@@ -105,7 +105,7 @@ describe("ExportDialog", () => {
     await btn(w, "Export").trigger("click");
     await flush();
     expect(saveDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "Reel.mp4" }));
-    expect(api.exportStart).toHaveBeenCalledWith({ destination: "/out/Reel.mp4", quality: "Standard", audio_only: false });
+    expect(api.exportStart).toHaveBeenCalledWith({ destination: "/out/Reel.mp4", quality: "Standard", audio_only: false }, []);
     expect(store.playing).toBe(false);
     expect(w.text()).toContain("0%");
     expect(btn(w, "Cancel")).toBeTruthy();
@@ -146,6 +146,16 @@ describe("ExportDialog", () => {
     await flush();
     expect(saveDialog).toHaveBeenCalledTimes(1);
     expect(api.exportStart).toHaveBeenCalledTimes(2);
+  });
+
+  it("hands one raster per title inside V1 to exportStart, drawn at the plan's output size", async () => {
+    const { store, w } = setup();
+    await flush();
+    store.project = { ...store.project!, texts: [textClip({ id: "t1", timeline_start: 0 }), textClip({ id: "late", timeline_start: 60_000 })] };
+    saveDialog.mockResolvedValueOnce("/out/Reel.mp4");
+    await btn(w, "Export").trigger("click");
+    await flush();
+    expect(api.exportStart).toHaveBeenCalledWith(expect.objectContaining({ destination: "/out/Reel.mp4" }), [{ id: "t1", png: "iVBORw0KGgo=" }]);
   });
 
   it("cancelling the save dialog aborts, and exportStart failures are shown", async () => {

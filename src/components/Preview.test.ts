@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { audioClip, audioTrack, clip, cue, media, overlay, project, resolveWith, stillMedia, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, clip, cue, media, overlay, project, resolveWith, stillMedia, textClip, type MockApi } from "../test/fixtures";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -12,7 +12,7 @@ const api = apiModule as unknown as MockApi;
 
 import Preview from "./Preview.vue";
 import { useProjectStore } from "../stores/project";
-import { resizeAll } from "../test/setup";
+import { FAKE_PNG_URL, resizeAll } from "../test/setup";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -202,6 +202,10 @@ describe("Preview", () => {
     expect(px(layer.attributes("style")!.match(/width: ([\d.]+)px/)![1])).toBeCloseTo(400, 0);
     expect(px(layer.attributes("style")!.match(/left: ([\d.]+)px/)![1])).toBeCloseTo(200, 0);
     expect(layer.attributes("style")).toContain("opacity: 0.5");
+    // constant opacity multiplies the fade
+    store.project = { ...store.project!, overlays: [{ ...ov, opacity: 0.5 }] };
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=overlay-layer]").attributes("style")).toContain("opacity: 0.25");
     // not selected: dragging the frame moves the crop, not the overlay
     const frame = w.find(".cursor-grab");
     await frame.trigger("pointerdown", { clientX: 100, clientY: 100, pointerId: 1 });
@@ -223,6 +227,43 @@ describe("Preview", () => {
     vi.useRealTimers();
   });
 
+  it("draws the current title from the canvas raster, moves it by drag and resizes it with the wheel when selected", async () => {
+    vi.useFakeTimers();
+    const t = textClip({ id: "t1", timeline_start: 1000, duration: 2000, fade_in: 500, x: 0.5, y: 0.5, style: { text: "Hey", font: "Impact", size: 0.1, color: "#ffffff", backdrop: null } });
+    const { store, w } = await setup(project([clip({ id: "a" })], { texts: [t] }));
+    store.playhead = 0;
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=text-layer]").exists()).toBe(false);
+    store.playhead = 1250;
+    await w.vm.$nextTick();
+    const layer = w.find("[data-testid=text-layer]");
+    expect(layer.attributes("src")).toBe(FAKE_PNG_URL);
+    // frame 800×450: 10 % → 45 px font, pad 20.25, 3 chars × 10 px → box 71 × 95 px, centred
+    const style = layer.attributes("style")!;
+    expect(px(style.match(/width: ([\d.]+)px/)![1])).toBe(71);
+    expect(px(style.match(/height: ([\d.]+)px/)![1])).toBe(95);
+    expect(px(style.match(/left: ([\d.]+)px/)![1])).toBeCloseTo(400 - 35.5, 1);
+    expect(style).toContain("opacity: 0.5");
+    const frame = w.find(".cursor-grab");
+    await frame.trigger("pointerdown", { clientX: 100, clientY: 100, pointerId: 1 });
+    await frame.trigger("pointermove", { clientX: 140, clientY: 100 });
+    await frame.trigger("pointerup");
+    expect(api.setCrop).toHaveBeenCalledTimes(1);
+    expect(api.textSetPosition).not.toHaveBeenCalled();
+    store.select({ kind: "text", id: "t1" });
+    await w.vm.$nextTick();
+    expect(w.text()).toContain("drag to place title");
+    await frame.trigger("pointerdown", { clientX: 100, clientY: 100, pointerId: 1 });
+    await frame.trigger("pointermove", { clientX: 180, clientY: 145 });
+    await frame.trigger("pointerup");
+    expect(api.textSetPosition).toHaveBeenCalledWith("t1", expect.closeTo(0.6, 3), expect.closeTo(0.6, 3));
+    expect(api.setCrop).toHaveBeenCalledTimes(1);
+    await frame.trigger("wheel", { deltaY: -100 });
+    vi.advanceTimersByTime(250);
+    expect(api.textSetStyle).toHaveBeenCalledWith("t1", expect.objectContaining({ font: "Impact", size: expect.closeTo(0.105, 3) }));
+    vi.useRealTimers();
+  });
+
   it("stacks every overlay under the playhead in layer order", async () => {
     const lo = overlay({ id: "lo", media: stillMedia(), timeline_start: 0, source_end: 3000, layer: 0 });
     const hi = overlay({ id: "hi", media: stillMedia(), timeline_start: 1000, source_end: 3000, layer: 1, placement: { scale: 0.2, x: 0.1, y: 0.1 } });
@@ -235,6 +276,27 @@ describe("Preview", () => {
     const layers = w.findAll("[data-testid=overlay-layer]");
     expect(layers).toHaveLength(2);
     expect(px(layers[1].attributes("style")!.match(/width: ([\d.]+)px/)![1])).toBeCloseTo(160, 0);
+  });
+
+  it("plays a video overlay's sound at clip × row volume, silent when either is muted", async () => {
+    const ov = overlay({ id: "ov", media: media({ has_audio: true }), timeline_start: 0, source_end: 3000, volume: 0.8 });
+    const { store, w } = await setup(project([clip({ id: "a" })], { overlays: [ov], overlay_audio: [{ muted: false, volume: 0.5 }] }));
+    store.playhead = 1000;
+    await flush();
+    const el = w.find("[data-testid=overlay-layer]").element as HTMLVideoElement;
+    expect(el.tagName).toBe("VIDEO");
+    expect(el.muted).toBe(false);
+    expect(el.volume).toBeCloseTo(0.4);
+    store.project = { ...store.project!, overlay_audio: [{ muted: true, volume: 0.5 }] };
+    await flush();
+    expect(el.muted).toBe(true);
+    store.project = { ...store.project!, overlay_audio: [{ muted: false, volume: 1 }], overlays: [{ ...ov, muted: true }] };
+    await flush();
+    expect(el.muted).toBe(true);
+    store.project = { ...store.project!, overlays: [{ ...ov, muted: false, volume: 1.5 }] };
+    await flush();
+    expect(el.muted).toBe(false);
+    expect(el.volume).toBe(1); // clip volumes above 100 % are capped in the preview
   });
 
   it("an unplayable source raises a banner once and does not stall the clip change", async () => {
@@ -311,6 +373,13 @@ describe("Preview", () => {
     expect(parseFloat((c.element as HTMLElement).style.fontSize)).toBeCloseTo(450 * 0.045, 3);
     expect(c.classes()).toContain("pointer-events-none");
     store.playhead = 5000 + 3000;
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=caption]").exists()).toBe(false);
+    // the captions track switched off hides it
+    store.playhead = 5000 + 1500;
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=caption]").exists()).toBe(true);
+    store.project = { ...store.project!, captions_enabled: false };
     await w.vm.$nextTick();
     expect(w.find("[data-testid=caption]").exists()).toBe(false);
   });

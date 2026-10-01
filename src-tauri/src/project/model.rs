@@ -13,6 +13,7 @@ pub const STILL_DEFAULT_MS: Ms = 5000;
 
 fn one() -> u32 { 1 }
 fn full() -> f32 { 1.0 }
+fn yes() -> bool { true }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rational {
@@ -205,6 +206,27 @@ pub struct OverlayClip {
     /// Which overlay row (0 = V2, 1 = V3, …). Higher layers composite on top.
     #[serde(default)]
     pub layer: u32,
+    /// 0–2, like V1 clips. Files saved before overlays carried sound have neither field: they load muted.
+    #[serde(default = "full")]
+    pub volume: f32,
+    #[serde(default = "yes")]
+    pub muted: bool,
+    /// 0–1 constant opacity for composite shots, on top of the fades.
+    #[serde(default = "full")]
+    pub opacity: f32,
+}
+
+/// Mute and fader for one overlay row (`Project.overlay_audio[layer]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayerAudio {
+    pub muted: bool,
+    pub volume: f32,
+}
+
+impl Default for LayerAudio {
+    fn default() -> Self {
+        LayerAudio { muted: false, volume: 1.0 }
+    }
 }
 
 impl OverlayClip {
@@ -222,6 +244,9 @@ impl OverlayClip {
             fade_out: 0,
             placement: if still { Placement::BADGE } else { Placement::FULL },
             layer: 0,
+            volume: 1.0,
+            muted: false,
+            opacity: 1.0,
         }
     }
     pub fn duration_ms(&self) -> Ms {
@@ -229,6 +254,72 @@ impl OverlayClip {
     }
     pub fn end_ms(&self) -> Ms {
         self.timeline_start + self.duration_ms()
+    }
+}
+
+/// Look of a title: font family (any CSS family name the system knows), line height as a fraction
+/// of the frame height, `#rrggbb` colour, optional rounded-rectangle backdrop. Rendered by the
+/// webview's canvas (ffmpeg has no drawtext here), so the preview and the export share one rasteriser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextStyle {
+    /// `\n` starts a new line; ≤ 500 chars.
+    pub text: String,
+    pub font: String,
+    /// 0.02–0.4 of the frame height.
+    pub size: f32,
+    pub color: String,
+    #[serde(default)]
+    pub backdrop: Option<Backdrop>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Backdrop {
+    pub color: String,
+    /// 0–1.
+    pub opacity: f32,
+}
+
+pub const TEXT_DEFAULT_FONT: &str = "Quicksand";
+pub const TEXT_MAX_CHARS: usize = 500;
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle { text: "Title".into(), font: TEXT_DEFAULT_FONT.into(), size: 0.08, color: "#ffffff".into(), backdrop: None }
+    }
+}
+
+/// A title on the text track (T1): free-positioned in time like a still, centred at `x`/`y`
+/// (normalised), burned into the export above every overlay layer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextClip {
+    pub id: Uuid,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub style: TextStyle,
+    pub timeline_start: Ms,
+    pub duration: Ms,
+    pub fade_in: Ms,
+    pub fade_out: Ms,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl TextClip {
+    pub fn new(text: impl Into<String>) -> Self {
+        TextClip {
+            id: Uuid::new_v4(),
+            name: None,
+            style: TextStyle { text: text.into(), ..TextStyle::default() },
+            timeline_start: 0,
+            duration: STILL_DEFAULT_MS,
+            fade_in: 0,
+            fade_out: 0,
+            x: 0.5,
+            y: 0.85,
+        }
+    }
+    pub fn end_ms(&self) -> Ms {
+        self.timeline_start + self.duration
     }
 }
 
@@ -367,6 +458,12 @@ pub struct Project {
     /// Number of overlay rows shown (V2, V3, …). Always ≥ 1 and ≥ every clip's layer + 1.
     #[serde(default = "one")]
     pub overlay_layers: u32,
+    /// One entry per overlay row; `relayout` keeps it the same length as `overlay_layers`.
+    #[serde(default)]
+    pub overlay_audio: Vec<LayerAudio>,
+    /// Titles on the single text track (T1).
+    #[serde(default)]
+    pub texts: Vec<TextClip>,
     /// Track-level mute for V1: every clip's audio is silenced on export and in the preview.
     #[serde(default)]
     pub video_muted: bool,
@@ -379,6 +476,9 @@ pub struct Project {
     pub pool: Vec<PoolItem>,
     #[serde(default)]
     pub transcripts: Vec<Transcript>,
+    /// Off = the caption row is dimmed, the preview shows no caption and export writes no `.srt`.
+    #[serde(default = "yes")]
+    pub captions_enabled: bool,
     #[serde(default)]
     pub highlights: Vec<Highlight>,
     /// v1 files only; `migrate` folds it into `audio_tracks` and clears it. Never written.
@@ -399,11 +499,14 @@ impl Project {
             clips: Vec::new(),
             overlays: Vec::new(),
             overlay_layers: 1,
+            overlay_audio: vec![LayerAudio::default()],
+            texts: Vec::new(),
             video_muted: false,
             video_volume: 1.0,
             audio_tracks: Vec::new(),
             pool: Vec::new(),
             transcripts: Vec::new(),
+            captions_enabled: true,
             highlights: Vec::new(),
             music: None,
             fps: None,
@@ -430,6 +533,9 @@ impl Project {
     }
     pub fn overlay_index(&self, id: Uuid) -> Option<usize> {
         self.overlays.iter().position(|c| c.id == id)
+    }
+    pub fn text_index(&self, id: Uuid) -> Option<usize> {
+        self.texts.iter().position(|c| c.id == id)
     }
     pub fn audio_track_index(&self, id: Uuid) -> Option<usize> {
         self.audio_tracks.iter().position(|t| t.id == id)
@@ -620,7 +726,8 @@ mod tests {
             "crop":{"scale":1.0,"x":0.5,"y":0.5},"clips":[],"music":null,"fps":null}"#;
         let p: Project = serde_json::from_str(j).unwrap();
         assert!(p.overlays.is_empty() && p.audio_tracks.is_empty() && p.pool.is_empty());
-        assert!(p.transcripts.is_empty() && p.highlights.is_empty());
+        assert!(p.transcripts.is_empty() && p.highlights.is_empty() && p.texts.is_empty());
+        assert!(p.captions_enabled);
         assert_eq!(p.overlay_layers, 1);
         assert!(!p.video_muted);
         assert_eq!(p.video_volume, 1.0);
@@ -677,6 +784,9 @@ mod tests {
         p.overlays.push(OverlayClip::new(PathBuf::from("/l.png"), st));
         p.pool.push(PoolItem { id: Uuid::new_v4(), path: PathBuf::from("/a.mp4"), media: media() });
         p.crop = Crop { scale: 1.5, x: 0.2, y: 0.8 };
+        let mut tc = TextClip::new("Hi\nthere");
+        tc.style.backdrop = Some(Backdrop { color: "#000000".into(), opacity: 0.5 });
+        p.texts.push(tc);
         p.transcripts.push(Transcript { source: PathBuf::from("/a.mp4"), cues: vec![Cue { id: Uuid::new_v4(), start: 0, end: 900, text: "hello".into() }] });
         p.highlights.push(Highlight {
             id: Uuid::new_v4(), title: "Hook".into(), reason: "r".into(), start: 0, end: 3000,
