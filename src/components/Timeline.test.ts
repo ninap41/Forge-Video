@@ -669,9 +669,23 @@ describe("Timeline", () => {
     });
 
     it("double-click corrects a caption; Escape and unchanged text do nothing", async () => {
-      const { w } = setup(talk());
+      const { store, w } = setup(talk());
       await w.vm.$nextTick();
+      const scroller = w.find(".overflow-x-auto").element as HTMLElement;
+      scroller.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1024, height: 200, right: 1024, bottom: 200, x: 0, y: 0, toJSON() {} });
+      const captured = vi.fn();
+      scroller.setPointerCapture = captured;
       const first = () => w.findAll("[data-testid=cue]")[0];
+      // The press that begins a double-click selects the track and seeks, but must not capture the
+      // pointer for a scrub: with capture, WebKit delivers the dblclick to the scroller instead of the cue.
+      store.playing = true;
+      await first().trigger("pointerdown", { clientX: 24 + 1000 * PX_PER_MS, pointerId: 1 });
+      expect(store.selectedCaptions).toBe(true);
+      expect(store.playing).toBe(false);
+      expect(store.playhead).toBeCloseTo(1000, 3);
+      expect(captured).not.toHaveBeenCalled();
+      await w.find(".overflow-x-auto").trigger("pointermove", { clientX: 24 + 4000 * PX_PER_MS });
+      expect(store.playhead).toBeCloseTo(1000, 3);
       await first().trigger("dblclick");
       const input = w.find("[data-testid=cue-text]");
       expect((input.element as HTMLInputElement).value).toBe("So here is the thing");

@@ -595,8 +595,8 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
               <div
                 v-for="(c, i) in store.cues" :key="i" data-testid="cue" class="absolute top-0 h-full rounded-sm border border-line bg-panel-2 text-[10px] leading-[20px] text-fg/90 px-1 truncate"
                 :class="store.currentCue?.id === c.id && store.currentCue.start === c.start ? 'border-accent/70' : ''"
-                :style="{ left: c.start * pxPerMs + 'px', width: Math.max(1, (c.end - c.start) * pxPerMs - 1) + 'px' }" :title="c.text"
-                @dblclick="editingCue = c.id"
+                :style="{ left: c.start * pxPerMs + 'px', width: Math.max(1, (c.end - c.start) * pxPerMs - 1) + 'px' }" :title="c.text || 'Double-click to edit'"
+                @pointerdown.stop="store.select(CAPTIONS_SELECTION); store.playing = false; store.seek(xToMs($event.clientX))" @dblclick="editingCue = c.id"
               >
                 <input
                   v-if="editingCue === c.id" v-focus data-testid="cue-text" aria-label="Caption text" :value="c.text" class="absolute inset-y-0 left-0 min-w-56 w-full bg-panel border border-accent rounded-sm px-1 text-fg z-30"
