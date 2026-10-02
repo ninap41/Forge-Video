@@ -1,6 +1,6 @@
 //! Captions are derived: source-time cues mapped through the V1 clips. Pure.
 
-use crate::project::{Cue, Ms, Project};
+use crate::project::{Cue, Ms, Project, Range};
 use crate::timeline::MIN_CLIP_MS;
 
 /// Every cue as it falls on the timeline, in order. A cue cut by a trim is shortened, not dropped.
@@ -24,6 +24,15 @@ pub fn timeline_cues(p: &Project) -> Vec<Cue> {
     }
     out.sort_by_key(|c| c.start);
     out
+}
+
+/// The cues of a range export: those inside `r`, clipped to it and re-timed so the range starts at 0.
+pub fn crop_cues(cues: Vec<Cue>, r: Range) -> Vec<Cue> {
+    cues.into_iter()
+        .filter(|c| c.end > r.start && c.start < r.end)
+        .map(|c| Cue { id: c.id, start: c.start.max(r.start) - r.start, end: c.end.min(r.end) - r.start, text: c.text })
+        .filter(|c| c.start + MIN_CLIP_MS <= c.end)
+        .collect()
 }
 
 fn srt_time(ms: Ms) -> String {
@@ -71,6 +80,19 @@ pub mod tests {
 
     fn spans(p: &Project) -> Vec<(Ms, Ms, String)> {
         timeline_cues(p).into_iter().map(|c| (c.start, c.end, c.text)).collect()
+    }
+
+    #[test]
+    fn crop_cues_keeps_clips_and_retimes_the_range() {
+        let p = podcast();
+        let out = crop_cues(timeline_cues(&p), Range { start: 5_000, end: 22_000 });
+        let spans: Vec<(Ms, Ms, String)> = out.into_iter().map(|c| (c.start, c.end, c.text)).collect();
+        assert_eq!(spans, vec![
+            (0, 4_000, "/a.mp4 0".into()),
+            (5_000, 14_000, "/a.mp4 1".into()),
+            (15_000, 17_000, "/a.mp4 2".into()),
+        ]);
+        assert!(crop_cues(timeline_cues(&p), Range { start: 9_950, end: 10_000 }).is_empty(), "slivers are dropped");
     }
 
     #[test]

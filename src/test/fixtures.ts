@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { AiStatus, AudioClip, AudioTrack, Clip, Cue, ExportPlan, Highlight, MediaInfo, OverlayClip, PoolItem, Project, TextClip } from "../types/project";
+import type { AiStatus, AudioClip, AudioTrack, Clip, Cue, ExportPlan, Highlight, Loop, MediaInfo, OverlayClip, PoolItem, Project, TextClip } from "../types/project";
 import { PLACEMENT_BADGE, PLACEMENT_FULL, STILL_DEFAULT_MS, TEXT_STYLE_DEFAULT } from "../types/project";
 
 let n = 0;
@@ -27,7 +27,7 @@ export const project = (clips: Clip[] = [], over: Partial<Project> = {}): Projec
   }
   return {
     version: 2, id: "proj-1", name: "Test", aspect: "YouTube16x9", crop: { scale: 1, x: 0.5, y: 0.5 }, clips,
-    overlays: [], overlay_layers: 1, overlay_audio: [{ muted: false, volume: 1 }], texts: [], video_muted: false, video_volume: 1, audio_tracks: [], pool: [], transcripts: [], captions_enabled: true, highlights: [], fps: null, ...over,
+    overlays: [], overlay_layers: 1, overlay_audio: [{ muted: false, volume: 1 }], texts: [], text_layers: 1, video_muted: false, video_volume: 1, audio_tracks: [], pool: [], transcripts: [], captions_enabled: true, highlights: [], loops: [], fps: null, ...over,
   };
 };
 
@@ -54,7 +54,7 @@ export const overlay = (over: Partial<OverlayClip> = {}): OverlayClip => {
 };
 export const textClip = (over: Partial<TextClip> = {}): TextClip => {
   n += 1;
-  return { id: over.id ?? `txt-${n}`, style: { ...TEXT_STYLE_DEFAULT, text: `Title ${n}` }, timeline_start: 0, duration: STILL_DEFAULT_MS, fade_in: 0, fade_out: 0, x: 0.5, y: 0.85, ...over };
+  return { id: over.id ?? `txt-${n}`, layer: 0, style: { ...TEXT_STYLE_DEFAULT, text: `Title ${n}` }, timeline_start: 0, duration: STILL_DEFAULT_MS, fade_in: 0, fade_out: 0, x: 0.5, y: 0.85, ...over };
 };
 export const poolItem = (over: Partial<PoolItem> = {}): PoolItem => {
   n += 1;
@@ -70,6 +70,10 @@ export const highlight = (over: Partial<Highlight> = {}): Highlight => {
   n += 1;
   const start = over.start ?? 1000, end = over.end ?? 8000;
   return { id: over.id ?? `hl-${n}`, title: "The hook", reason: "Strong open", start, end, keep: [{ start, end }], fade_in: 0, fade_out: 0, notes: [], ...over };
+};
+export const loopFx = (over: Partial<Loop> = {}): Loop => {
+  n += 1;
+  return { id: over.id ?? `loop-${n}`, name: "Hook", start: 1000, end: 8000, ...over };
 };
 export const AI_READY: AiStatus = { whisper: "/opt/homebrew/bin/whisper-cli", model: "/models/ggml-base.en.bin", model_path: "/models/ggml-base.en.bin", claude: "/opt/homebrew/bin/claude", account: "matt@example.com" };
 
@@ -90,7 +94,7 @@ export function mockApi(p: Project) {
     poolAdd: resolved(p), poolRemove: resolved(p),
     overlayAdd: resolved(p), overlayMove: resolved(p), overlayLayerAdd: resolved(p), overlayLayerRemove: resolved(p), overlayTrim: resolved(p), overlaySplit: resolved({ project: p, new_id: "new" }),
     overlayDelete: resolved(p), overlaySetFades: resolved(p), overlaySetAudio: resolved(p), overlaySetOpacity: resolved(p), overlayLayerSetAudio: resolved(p), overlaySetPlacement: resolved(p),
-    textAdd: resolved(p), textMove: resolved(p), textTrim: resolved(p), textSplit: resolved({ project: p, new_id: "new" }), textDelete: resolved(p),
+    textAdd: resolved(p), textMove: resolved(p), textLayerAdd: resolved(p), textLayerRemove: resolved(p), loopAdd: resolved(p), loopRemove: resolved(p), textTrim: resolved(p), textSplit: resolved({ project: p, new_id: "new" }), textDelete: resolved(p),
     textSetFades: resolved(p), textSetPosition: resolved(p), textSetStyle: resolved(p), systemFonts: resolved(["Quicksand", "Orbit", "Helvetica Neue", "Impact"]),
     audioTrackAdd: resolved(p), audioTrackUpdate: resolved(p), audioTrackRemove: resolved(p),
     audioClipAdd: resolved(p), audioClipMove: resolved(p), audioClipTrim: resolved(p), audioClipSplit: resolved({ project: p, new_id: "new" }),
@@ -112,7 +116,7 @@ export function resolveWith(api: MockApi, p: Project) {
     "clipSetFades", "clipSetTransition", "clipSetVolume", "clipDetachAudio", "clipRename", "clipInsert", "poolAdd", "poolRemove",
     "overlayAdd", "overlayMove", "overlayLayerAdd", "overlayLayerRemove", "overlayTrim", "overlayDelete", "overlaySetFades", "overlaySetAudio", "overlaySetOpacity", "overlayLayerSetAudio", "overlaySetPlacement",
     "audioTrackAdd", "audioTrackUpdate", "audioTrackRemove", "audioClipAdd", "audioClipMove", "audioClipTrim", "audioClipDelete", "audioClipSet",
-    "textAdd", "textMove", "textTrim", "textDelete", "textSetFades", "textSetPosition", "textSetStyle",
+    "textAdd", "textMove", "textLayerAdd", "textLayerRemove", "loopAdd", "loopRemove", "textTrim", "textDelete", "textSetFades", "textSetPosition", "textSetStyle",
     "cueSetText", "highlightDelete"] as const) {
     api[k].mockImplementation(() => Promise.resolve(p) as never);
   }

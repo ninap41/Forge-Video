@@ -27,12 +27,44 @@ async fn stream_copy_trim_is_fast_and_valid() {
     let id = p.clips[0].id;
     timeline::trim(&mut p, id, 1000, 4000).unwrap();
     let out = dir.path().join("trim.mp4");
-    let s = ExportSettings { destination: out.clone(), quality: Quality::Standard, audio_only: false };
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Standard, audio_only: false, range: None };
     let plan = run(&p, &s).await;
     assert_eq!(plan.strategy, Strategy::StreamCopy);
     let m = media::probe(&out).await.unwrap();
     assert_eq!(m.codec, "h264");
     assert!((2500..=3600).contains(&m.duration_ms), "duration {}", m.duration_ms);
+}
+
+#[tokio::test]
+async fn zoomed_out_export_renders_the_source_small_on_black() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = fixture("clip_a_720p.mp4");
+    let mut p = Project::new("t");
+    timeline::append(&mut p, Clip::new(src.clone(), media::probe(&src).await.unwrap()));
+    let id = p.clips[0].id;
+    timeline::trim(&mut p, id, 0, 1000).unwrap();
+    p.crop = Crop { scale: 0.5, x: 0.2, y: 0.8 };
+    let out = dir.path().join("small.mp4");
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false, range: None };
+    let plan = run(&p, &s).await;
+    assert_eq!(plan.strategy, Strategy::HardwareEncode);
+    let m = media::probe(&out).await.unwrap();
+    assert_eq!((m.width, m.height), (1920, 1080));
+}
+
+#[tokio::test]
+async fn range_export_renders_only_the_span() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = fixture("clip_a_720p.mp4");
+    let mut p = Project::new("t");
+    timeline::append(&mut p, Clip::new(src.clone(), media::probe(&src).await.unwrap()));
+    let out = dir.path().join("range.mp4");
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false, range: Some(Range { start: 1000, end: 2500 }) };
+    let plan = run(&p, &s).await;
+    assert_eq!(plan.strategy, Strategy::HardwareEncode);
+    assert_eq!(plan.duration_ms, 1500);
+    let m = media::probe(&out).await.unwrap();
+    assert!((1300..=1700).contains(&m.duration_ms), "duration {}", m.duration_ms);
 }
 
 #[tokio::test]
@@ -59,7 +91,7 @@ async fn multi_clip_render_with_dissolve_music_and_vertical_crop() {
     assert_eq!(p.duration_ms(), 5500);
 
     let out = dir.path().join("render.mp4");
-    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false };
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false, range: None };
     let plan = run(&p, &s).await;
     assert_eq!(plan.strategy, Strategy::HardwareEncode);
     let mi = media::probe(&out).await.unwrap();
@@ -70,7 +102,7 @@ async fn multi_clip_render_with_dissolve_music_and_vertical_crop() {
 
     // audio-only export of the same project
     let out_a = dir.path().join("render.m4a");
-    let s = ExportSettings { destination: out_a.clone(), quality: Quality::Draft, audio_only: true };
+    let s = ExportSettings { destination: out_a.clone(), quality: Quality::Draft, audio_only: true, range: None };
     let plan = run(&p, &s).await;
     assert_eq!(plan.strategy, Strategy::AudioOnly);
     let ma = media::probe(&out_a).await.unwrap();
@@ -113,7 +145,7 @@ async fn overlay_png_and_video_over_v1_with_two_audio_tracks() {
     assert_eq!(p.duration_ms(), 5000);
 
     let out = dir.path().join("overlay.mp4");
-    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false };
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false, range: None };
     let plan = run(&p, &s).await;
     assert_eq!(plan.strategy, Strategy::HardwareEncode);
     assert_eq!(plan.reasons, vec!["2 clips on the timeline"], "multiple V1 clips short-circuit the blocker list");
@@ -135,14 +167,14 @@ async fn text_raster_is_burned_in_above_the_overlay() {
     timeline::overlay_add(&mut p, OverlayClip::new(logo.clone(), media::probe(&logo).await.unwrap()), 0, 0);
     let mut t = TextClip::new("Hello");
     t.fade_in = 200; t.fade_out = 200;
-    let tid = timeline::text_add(&mut p, t, 500);
+    let tid = timeline::text_add(&mut p, t, 500, 0);
     timeline::text_trim(&mut p, tid, 2000).unwrap();
     // the webview would rasterise the title; any PNG proves the path
     let raster = dir.path().join("title.png");
     std::fs::copy(&logo, &raster).unwrap();
 
     let out = dir.path().join("text.mp4");
-    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false };
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false, range: None };
     let plan = plan_with_texts(&p, &s, &[(tid, raster)]).unwrap();
     assert!(plan.reasons.contains(&"text track".to_string()), "{:?}", plan.reasons);
     let mut last = 0.0;
@@ -205,7 +237,7 @@ async fn many_audio_and_video_formats_probe_and_export() {
         at += 500;
     }
     let out = d.join("mix.mp4");
-    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false };
+    let s = ExportSettings { destination: out.clone(), quality: Quality::Draft, audio_only: false, range: None };
     let plan = run(&p, &s).await;
     assert_eq!(plan.strategy, Strategy::HardwareEncode);
     let m = media::probe(&out).await.unwrap();
@@ -214,7 +246,7 @@ async fn many_audio_and_video_formats_probe_and_export() {
     assert_eq!(m.duration_ms / 100, p.duration_ms() / 100);
 
     let out_a = d.join("mix.m4a");
-    let s = ExportSettings { destination: out_a.clone(), quality: Quality::Draft, audio_only: true };
+    let s = ExportSettings { destination: out_a.clone(), quality: Quality::Draft, audio_only: true, range: None };
     run(&p, &s).await;
     assert_eq!(media::probe(&out_a).await.unwrap().kind(), MediaKind::Audio);
 }

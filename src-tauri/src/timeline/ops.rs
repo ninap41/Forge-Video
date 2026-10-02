@@ -3,7 +3,7 @@
 //! clip; overlay and audio clips are free-positioned, sorted, and never overlap within a track.
 
 use crate::error::{Error, Result};
-use crate::project::{AudioClip, Clip, LayerAudio, Ms, OverlayClip, Placement, Project, TextClip, TextStyle, Transition, TEXT_DEFAULT_FONT, TEXT_MAX_CHARS};
+use crate::project::{AudioClip, Clip, LayerAudio, Loop, Ms, OverlayClip, Placement, Project, TextClip, TextStyle, Transition, TEXT_DEFAULT_FONT, TEXT_MAX_CHARS};
 use uuid::Uuid;
 
 /// Minimum clip length we allow, so trims/splits can't produce zero-length clips.
@@ -69,7 +69,7 @@ pub fn relayout(p: &mut Project) {
         o.opacity = if o.opacity.is_finite() { o.opacity.clamp(0.0, 1.0) } else { 1.0 };
     }
 
-    // Text track: clamp the style and lengths, then sort and push apart like a single overlay row.
+    // Text rows: clamp the style and lengths, then sort and push apart within each row.
     for t in &mut p.texts {
         t.duration = t.duration.max(MIN_CLIP_MS);
         t.fade_in = t.fade_in.min(t.duration);
@@ -78,12 +78,16 @@ pub fn relayout(p: &mut Project) {
         t.y = if t.y.is_finite() { t.y.clamp(0.0, 1.0) } else { 0.85 };
         t.style = clean_style(t.style.clone());
     }
-    p.texts.sort_by_key(|t| t.timeline_start);
+    p.texts.sort_by_key(|t| (t.layer, t.timeline_start));
     let mut end: Ms = 0;
+    let mut layer = u32::MAX;
     for t in &mut p.texts {
+        if t.layer != layer { layer = t.layer; end = 0; }
         t.timeline_start = t.timeline_start.max(end);
         end = t.end_ms();
     }
+    let needed = p.texts.iter().map(|t| t.layer + 1).max().unwrap_or(1);
+    p.text_layers = p.text_layers.max(needed).max(1);
 
     p.video_volume = if p.video_volume.is_finite() { p.video_volume.clamp(0.0, 1.0) } else { 1.0 };
     // Audio tracks: same rules per track.
@@ -119,6 +123,13 @@ pub fn relayout(p: &mut Project) {
         h.keep.retain(|r| r.start + MIN_CLIP_MS <= r.end);
     }
     p.highlights.retain(|h| h.start + MIN_CLIP_MS <= h.end && !h.keep.is_empty());
+
+    // Pinned loops: fixed in timeline time, clamped to V1 and dropped once too short.
+    for l in &mut p.loops {
+        l.end = l.end.min(total);
+        l.start = l.start.min(l.end);
+    }
+    p.loops.retain(|l| l.start + MIN_CLIP_MS <= l.end);
 }
 
 fn idx(p: &Project, id: Uuid) -> Result<usize> {
@@ -508,16 +519,34 @@ pub fn locate_overlays(p: &Project, t: Ms) -> Vec<(usize, Ms)> {
     p.overlays.iter().enumerate().filter(|(_, o)| t >= o.timeline_start && t < o.end_ms()).map(|(i, o)| (i, o.source_start + (t - o.timeline_start))).collect()
 }
 
-// ---------- Text track (T1) ----------
+// ---------- Text rows (T1, T2, …) ----------
 
 fn xidx(p: &Project, id: Uuid) -> Result<usize> {
     p.text_index(id).ok_or(Error::ClipNotFound(id))
 }
 
 fn claim_text(p: &mut Project, winner: usize) {
-    let mut spans: Vec<(Ms, Ms)> = p.texts.iter().map(|t| (t.timeline_start, t.end_ms())).collect();
+    let layer = p.texts[winner].layer;
+    // Titles on other rows never collide: give them a span that overlaps nothing.
+    let mut spans: Vec<(Ms, Ms)> = p.texts.iter().map(|t| if t.layer == layer { (t.timeline_start, t.end_ms()) } else { (Ms::MAX, Ms::MAX) }).collect();
     claim(&mut spans, winner);
-    for (t, (s, _)) in p.texts.iter_mut().zip(spans) { t.timeline_start = s; }
+    for (t, (s, _)) in p.texts.iter_mut().zip(spans) { if t.layer == layer { t.timeline_start = s; } }
+}
+
+pub fn text_layer_add(p: &mut Project) {
+    p.text_layers += 1;
+}
+
+/// Remove a text row and every title on it; higher rows shift down. The last row cannot go.
+pub fn text_layer_remove(p: &mut Project, layer: u32) -> Result<()> {
+    if p.text_layers <= 1 || layer >= p.text_layers {
+        return Err(Error::InvalidEdit("cannot remove that text row".into()));
+    }
+    p.texts.retain(|t| t.layer != layer);
+    for t in &mut p.texts { if t.layer > layer { t.layer -= 1; } }
+    p.text_layers -= 1;
+    relayout(p);
+    Ok(())
 }
 
 /// Keep a style renderable: non-empty font, size 0.02–0.4, `#rrggbb` colours, text ≤ 500 chars.
@@ -537,8 +566,9 @@ fn is_hex_color(c: &str) -> bool {
     c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
-pub fn text_add(p: &mut Project, mut clip: TextClip, at: Ms) -> Uuid {
+pub fn text_add(p: &mut Project, mut clip: TextClip, at: Ms, layer: u32) -> Uuid {
     clip.timeline_start = at;
+    clip.layer = layer;
     let id = clip.id;
     p.texts.push(clip);
     let i = p.texts.len() - 1;
@@ -547,9 +577,10 @@ pub fn text_add(p: &mut Project, mut clip: TextClip, at: Ms) -> Uuid {
     id
 }
 
-pub fn text_move(p: &mut Project, id: Uuid, timeline_start: Ms) -> Result<()> {
+pub fn text_move(p: &mut Project, id: Uuid, timeline_start: Ms, layer: u32) -> Result<()> {
     let i = xidx(p, id)?;
     p.texts[i].timeline_start = timeline_start;
+    p.texts[i].layer = layer;
     claim_text(p, i);
     relayout(p);
     Ok(())
@@ -613,6 +644,31 @@ pub fn text_set_style(p: &mut Project, id: Uuid, style: TextStyle) -> Result<()>
 /// Titles under a timeline position.
 pub fn locate_texts(p: &Project, t: Ms) -> Vec<usize> {
     p.texts.iter().enumerate().filter(|(_, x)| t >= x.timeline_start && t < x.end_ms()).map(|(i, _)| i).collect()
+}
+
+// ---------- Pinned loops ----------
+
+/// Pin `start..end` of the timeline. A blank name becomes the span (`m:ss–m:ss`); the end is
+/// clamped to V1 and the loop must still be at least `MIN_CLIP_MS` long.
+pub fn loop_add(p: &mut Project, name: &str, start: Ms, end: Ms) -> Result<Uuid> {
+    let end = end.min(p.duration_ms());
+    check_range(start, end)?;
+    let name: String = name.trim().chars().take(80).collect();
+    let name = if name.is_empty() { format!("{}–{}", span_label(start), span_label(end)) } else { name };
+    let id = Uuid::new_v4();
+    p.loops.push(Loop { id, name, start, end });
+    relayout(p);
+    Ok(id)
+}
+
+fn span_label(ms: Ms) -> String {
+    format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)
+}
+
+pub fn loop_remove(p: &mut Project, id: Uuid) -> Result<()> {
+    let i = p.loop_index(id).ok_or(Error::ClipNotFound(id))?;
+    p.loops.remove(i);
+    Ok(())
 }
 
 // ---------- Audio tracks ----------
@@ -870,11 +926,11 @@ mod track_tests {
     fn texts_push_apart_trim_split_and_clean_style() {
         use crate::project::Backdrop;
         let mut p = Project::new("t");
-        let a = text_add(&mut p, TextClip::new("Hello"), 3000);
-        let b = text_add(&mut p, TextClip::new("World"), 0);
+        let a = text_add(&mut p, TextClip::new("Hello"), 3000, 0);
+        let b = text_add(&mut p, TextClip::new("World"), 0, 0);
         assert_eq!(p.texts.iter().map(|t| t.id).collect::<Vec<_>>(), vec![b, a]);
         assert_eq!(p.texts[1].timeline_start, 5000, "b (5 s) pushes a after it");
-        text_move(&mut p, a, 1000).unwrap();
+        text_move(&mut p, a, 1000, 0).unwrap();
         assert_eq!(p.texts.iter().find(|t| t.id == a).unwrap().timeline_start, 1000);
         assert_eq!(p.texts.iter().find(|t| t.id == b).unwrap().timeline_start, 6000, "moved clip wins");
         assert_eq!(locate_texts(&p, 2000), vec![0]);
@@ -906,6 +962,57 @@ mod track_tests {
         text_delete(&mut p, a).unwrap();
         assert!(text_delete(&mut p, a).is_err());
         assert_eq!(p.texts.len(), 2);
+    }
+
+    #[test]
+    fn text_rows_are_independent_and_can_be_added_and_removed() {
+        let mut p = Project::new("t");
+        let a = text_add(&mut p, TextClip::new("A"), 0, 0);
+        let b = text_add(&mut p, TextClip::new("B"), 1000, 1);
+        assert_eq!(p.text_layers, 2, "placing on row 1 grows the row count");
+        assert_eq!(p.texts.iter().map(|t| t.id).collect::<Vec<_>>(), vec![a, b], "sorted by (layer, start)");
+        assert_eq!(p.texts[1].timeline_start, 1000, "other rows never push");
+        text_add(&mut p, TextClip::new("C"), 2000, 2);
+        assert_eq!(p.text_layers, 3);
+        text_move(&mut p, b, 0, 0).unwrap();
+        let (ta, tb) = (p.texts.iter().find(|t| t.id == a).unwrap(), p.texts.iter().find(|t| t.id == b).unwrap());
+        assert_eq!((tb.layer, tb.timeline_start, ta.timeline_start), (0, 0, 5000), "moved onto row 0 and wins its spot");
+        text_layer_add(&mut p);
+        assert_eq!(p.text_layers, 4);
+        text_layer_remove(&mut p, 1).unwrap();
+        assert_eq!(p.text_layers, 3);
+        assert_eq!(p.texts.len(), 3, "row 1 was empty");
+        assert_eq!(p.texts.iter().find(|t| t.style.text == "C").unwrap().layer, 1, "higher rows shift down");
+        text_layer_remove(&mut p, 1).unwrap();
+        assert_eq!(p.texts.len(), 2, "its titles go with it");
+        assert!(text_layer_remove(&mut p, 5).is_err());
+        text_layer_remove(&mut p, 1).unwrap();
+        assert!(text_layer_remove(&mut p, 0).is_err(), "last row stays");
+        let r = text_split(&mut p, a, 7000).unwrap();
+        assert_eq!(p.texts.iter().find(|t| t.id == r).unwrap().layer, 0, "split keeps the row");
+    }
+
+    #[test]
+    fn loops_pin_clamp_and_drop() {
+        let mut p = Project::new("l");
+        append(&mut p, Clip::new("/a.mp4".into(), vid(10_000)));
+        append(&mut p, Clip::new("/b.mp4".into(), vid(10_000)));
+        let a = loop_add(&mut p, "  Hook  ", 1000, 4000).unwrap();
+        let b = loop_add(&mut p, "", 15_000, 99_000).unwrap();
+        assert!(loop_add(&mut p, "x", 5000, 5050).is_err());
+        assert!(loop_add(&mut p, "x", 19_950, 30_000).is_err(), "clamped end makes it too short");
+        assert_eq!(p.loops[0].name, "Hook");
+        assert_eq!((p.loops[1].name.as_str(), p.loops[1].end), ("0:15–0:20", 20_000), "blank name = span, end clamped to V1");
+        p.clips.pop();
+        relayout(&mut p);
+        assert_eq!(p.loops.iter().map(|l| l.id).collect::<Vec<_>>(), vec![a], "a loop past the new end is dropped");
+        let c = loop_add(&mut p, "tail", 9000, 10_000).unwrap();
+        p.clips[0].source_end = 9500;
+        relayout(&mut p);
+        assert_eq!(p.loops.iter().find(|l| l.id == c).unwrap().end, 9500, "clamped, still long enough");
+        loop_remove(&mut p, a).unwrap();
+        assert!(loop_remove(&mut p, b).is_err());
+        assert_eq!(p.loops.len(), 1);
     }
 
     #[test]

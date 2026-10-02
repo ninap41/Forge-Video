@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import { audioClip, audioTrack, clip, media, overlay, project, resolveWith, stillMedia, textClip, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, clip, media, overlay, project, resolveWith, stillMedia, textClip, type MockApi, cue } from "../test/fixtures";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -44,10 +44,19 @@ describe("Inspector · output", () => {
     const { w } = setup();
     await byText(w, "Shorts").trigger("click");
     expect(api.setAspect).toHaveBeenCalledWith("Shorts9x16");
-    const zoom = w.findAll("section")[0].find("input[type=range]");
-    await zoom.setValue("2.5");
+    const zoom = w.find("[data-testid=crop-zoom]");
+    expect((zoom.element as HTMLInputElement).value).toBe("0");
+    await zoom.setValue("50"); // +50 → halfway to 4× = 2.5×
     await zoom.trigger("change");
     expect(api.setCrop).toHaveBeenCalledWith({ scale: 2.5, x: 0.5, y: 0.5 });
+    expect(w.find("[data-testid=crop-zoom-label]").text()).toBe("+50");
+    await zoom.setValue("-100"); // zoomed all the way out → 0.25×
+    await zoom.trigger("change");
+    expect(api.setCrop).toHaveBeenLastCalledWith({ scale: 0.25, x: 0.5, y: 0.5 });
+    expect(w.find("[data-testid=crop-zoom-label]").text()).toBe("-100");
+    await zoom.setValue("-40");
+    await zoom.trigger("change");
+    expect(api.setCrop).toHaveBeenLastCalledWith({ scale: 0.7, x: 0.5, y: 0.5 });
     await byText(w, "Reset framing").trigger("click");
     expect(api.setCrop).toHaveBeenLastCalledWith({ scale: 1, x: 0.5, y: 0.5 });
   });
@@ -134,6 +143,41 @@ describe("Inspector · clip", () => {
     expect(api.clipDelete).toHaveBeenCalledWith("b");
   });
 
+  it("offers Join under Split once two or more clips are selected, for V1, overlay and audio clips but never titles", async () => {
+    const p = project([clip({ id: "a", source: "/v/a.mp4" }), clip({ id: "b", source: "/v/a.mp4" })], {
+      overlays: [overlay({ id: "o1" }), overlay({ id: "o2", timeline_start: 6000 })],
+      audio_tracks: [audioTrack([audioClip({ id: "c1" }), audioClip({ id: "c2", timeline_start: 30_000 })], { id: "t1" })],
+      texts: [textClip({ id: "x1" }), textClip({ id: "x2", timeline_start: 6000 })],
+    });
+    const { store, w } = setup(p, "a");
+    expect(w.find("[data-testid=join]").exists()).toBe(false);
+    store.select("b", true);
+    await w.vm.$nextTick();
+    const join = w.find("[data-testid=join]");
+    expect(join.text()).toBe("Join 2 clips (⌘J)");
+    const sections = w.findAll("section");
+    const buttons = sections[1].findAll("button").map((b) => b.text());
+    expect(buttons.indexOf("Join 2 clips (⌘J)")).toBeGreaterThan(buttons.indexOf("Split at playhead (⌘T)"));
+    api.clipMerge.mockImplementationOnce(() => Promise.resolve({ project: p, new_id: "a" }));
+    await join.trigger("click");
+    expect(api.clipMerge).toHaveBeenCalledWith(["a", "b"]);
+    // overlays
+    store.select({ kind: "overlay", id: "o1" });
+    store.select({ kind: "overlay", id: "o2" }, true);
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=join]").text()).toBe("Join 2 clips (⌘J)");
+    // audio
+    store.select({ kind: "audio", id: "c1", trackId: "t1" });
+    store.select({ kind: "audio", id: "c2", trackId: "t1" }, true);
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=join]").exists()).toBe(true);
+    // titles cannot merge
+    store.select({ kind: "text", id: "x1" });
+    store.select({ kind: "text", id: "x2" }, true);
+    await w.vm.$nextTick();
+    expect(w.find("[data-testid=join]").exists()).toBe(false);
+  });
+
   it("local slider state follows the selected clip", async () => {
     const { store, w } = setup(project([clip({ id: "a", fade_in: 300, volume: 0.4 }), clip({ id: "b", fade_in: 0, volume: 1 })]), "a");
     expect(w.text()).toContain("0.30s");
@@ -183,6 +227,7 @@ describe("Inspector · overlay and audio clips", () => {
     await w.vm.$nextTick(); await w.vm.$nextTick();
     const section = w.find("[data-testid=text-section]");
     expect(section.text()).toContain("Title");
+    expect(section.text()).toContain("row T1");
     expect(api.systemFonts).toHaveBeenCalledTimes(1);
     await w.vm.$nextTick();
     expect(w.findAll("[data-testid=text-font] option").map((o) => o.text())).toEqual(["Quicksand", "Orbit", "Helvetica Neue", "Impact"]);
@@ -237,6 +282,41 @@ describe("Inspector · overlay and audio clips", () => {
     await w.vm.$nextTick();
     expect(w.find("[data-testid=overlay-volume]").exists()).toBe(false);
     expect(w.text()).toContain("Video (no sound)");
+  });
+
+  it("lists the captions when the track is selected and edits one inline (Enter commits, Escape cancels, blank removes)", async () => {
+    const p = project([clip({ id: "a", source: "/v/a.mp4" })], {
+      transcripts: [{ source: "/v/a.mp4", cues: [cue(0, 2000, "So here is the thing", { id: "c1" }), cue(2500, 4500, "nobody tells you", { id: "c2" })] }],
+    });
+    const { store, w } = setup(p);
+    store.select({ kind: "captions", id: "captions" });
+    await w.vm.$nextTick();
+    const rows = w.findAll("[data-testid=cue-row]");
+    expect(rows).toHaveLength(2);
+    expect(rows[1].text()).toContain("0:02");
+    expect(rows[1].text()).toContain("nobody tells you");
+    store.playing = true;
+    await rows[1].find("button").trigger("click");
+    expect([store.playhead, store.playing]).toEqual([2500, false]);
+    await rows[0].findAll("button")[1].trigger("click");
+    const input = w.find("[data-testid=cue-edit]");
+    expect((input.element as HTMLInputElement).value).toBe("So here is the thing");
+    await input.setValue("So here's the thing");
+    await input.trigger("keydown", { key: "Enter" });
+    expect(api.cueSetText).toHaveBeenCalledWith("c1", "So here's the thing");
+    expect(w.find("[data-testid=cue-edit]").exists()).toBe(false);
+    // Escape cancels without a call; an unchanged blur is a no-op; blank removes
+    await rows[1].findAll("button")[1].trigger("click");
+    await w.find("[data-testid=cue-edit]").setValue("changed");
+    await w.find("[data-testid=cue-edit]").trigger("keydown", { key: "Escape" });
+    expect(api.cueSetText).toHaveBeenCalledTimes(1);
+    await rows[1].findAll("button")[1].trigger("click");
+    await w.find("[data-testid=cue-edit]").trigger("blur");
+    expect(api.cueSetText).toHaveBeenCalledTimes(1);
+    await rows[1].findAll("button")[1].trigger("click");
+    await w.find("[data-testid=cue-edit]").setValue("   ");
+    await w.find("[data-testid=cue-edit]").trigger("blur");
+    expect(api.cueSetText).toHaveBeenLastCalledWith("c2", "");
   });
 
   it("shows the captions track with its on/off switch when selected", async () => {

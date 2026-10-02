@@ -2,12 +2,11 @@ import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { api } from "../api/tauri";
 import { timelineCues, transcriptText, cueAt } from "../utils/captions";
-import { basename } from "../utils/time";
 import { rasterBase64, rasterText } from "../utils/textRaster";
 import {
   type AiStatus, type AspectPreset, type AudioClip, type AudioTrack, type Crop, type LayerAudio, type MediaInfo, type Ms, type OverlayClip,
-  type Placement, type PoolItem, type Project, type TextClip, type TextRaster, type TextStyle, type Transition,
-  LAYER_AUDIO_DEFAULT, clipDuration, clipEnd, mediaKind, projectDuration, textEnd,
+  type Placement, type PoolItem, type Project, type Range, type TextClip, type TextRaster, type TextStyle, type Transition,
+  LAYER_AUDIO_DEFAULT, clipDuration, clipEnd, mediaKind, projectDuration, sameRange, textEnd,
 } from "../types/project";
 
 export interface Thumbs { intervalMs: number; urls: string[] }
@@ -59,13 +58,46 @@ export const useProjectStore = defineStore("project", () => {
   const timelineHeight = ref(Number(readLocal("forgevideo.timelineHeight", "360")) || 360);
   watch(poolView, (v) => writeLocal("forgevideo.poolView", v));
   watch(timelineHeight, (v) => writeLocal("forgevideo.timelineHeight", String(v)));
+  /** The Pinned loops drawer under the tracks. */
+  const loopsOpen = ref(readLocal("forgevideo.loopsOpen", "1") === "1");
+  watch(loopsOpen, (v) => writeLocal("forgevideo.loopsOpen", v ? "1" : "0"));
+  /** Where the project was last saved or opened from; reopened on launch and the default folder for Open / Save. */
+  const lastProjectPath = ref<string | null>(readLocal("forgevideo.lastProject", "") || null);
+  function rememberPath(path: string | null) {
+    lastProjectPath.value = path;
+    writeLocal("forgevideo.lastProject", path ?? "");
+  }
+  /** The Export dialog; lives here so the loops drawer and the AI panel can open it. */
+  const exportOpen = ref(false);
+  /** ✦ AI: the panel replaces the Inspector and the green highlight bands show on the timeline. */
+  const aiOpen = ref(false);
+  /** Splitters: the library column's width and the Pinned loops drawer's height, both remembered. */
+  const libraryWidth = ref(Number(readLocal("forgevideo.libraryWidth", "288")) || 288);
+  const loopsHeight = ref(Number(readLocal("forgevideo.loopsHeight", "120")) || 120);
+  watch(libraryWidth, (v) => writeLocal("forgevideo.libraryWidth", String(v)));
+  watch(loopsHeight, (v) => writeLocal("forgevideo.loopsHeight", String(v)));
+  /** Bumped whenever a loop is pinned or picked, so the timeline scrolls to show the range. */
+  const revealRange = ref(0);
+
+  // ---- range selection (session only) and pinned loops (in the project) ----
+  /** The yellow span selected on the ruler, in timeline ms. */
+  const range = ref<Range | null>(null);
+  /** When on, playback wraps from `range.end` back to `range.start`. */
+  const loopOn = ref(false);
+  /** The pinned loop the range came from, if any. Editing the range clears it. */
+  const activeLoopId = ref<string | null>(null);
 
   const clips = computed(() => project.value?.clips ?? []);
   const overlays = computed(() => project.value?.overlays ?? []);
   const audioTracks = computed(() => project.value?.audio_tracks ?? []);
   const texts = computed(() => project.value?.texts ?? []);
+  const textLayers = computed(() => Math.max(1, project.value?.text_layers ?? 1));
   const pool = computed(() => project.value?.pool ?? []);
   const duration = computed(() => (project.value ? projectDuration(project.value) : 0));
+  const loops = computed(() => project.value?.loops ?? []);
+  const activeLoop = computed(() => loops.value.find((l) => l.id === activeLoopId.value) ?? null);
+  /** What the preview wraps on: the range, only while looping is on. */
+  const loopRange = computed<Range | null>(() => (loopOn.value && range.value ? range.value : null));
 
   /** V1 selection, kept as a writable id so existing callers and tests keep working. */
   const selectedClipId = computed<string | null>({
@@ -107,10 +139,10 @@ export const useProjectStore = defineStore("project", () => {
       return { clip: o, sourceMs: o.source_start + (t - o.timeline_start), gain: silent ? 0 : Math.min(1, o.volume * row.volume) };
     });
   });
-  /** Titles under the playhead with their fade opacity; mirrors timeline::locate_texts. */
+  /** Titles under the playhead with their fade opacity, lowest row first; mirrors timeline::locate_texts. */
   const currentTexts = computed<{ clip: TextClip; opacity: number }[]>(() => {
     const t = playhead.value;
-    return texts.value.filter((x) => t >= x.timeline_start && t < textEnd(x)).map((x) => {
+    return [...texts.value].sort((a, b) => a.layer - b.layer || a.timeline_start - b.timeline_start).filter((x) => t >= x.timeline_start && t < textEnd(x)).map((x) => {
       const off = t - x.timeline_start;
       const fi = x.fade_in > 0 ? Math.min(1, off / x.fade_in) : 1;
       const fo = x.fade_out > 0 ? Math.min(1, (x.duration - off) / x.fade_out) : 1;
@@ -184,7 +216,41 @@ export const useProjectStore = defineStore("project", () => {
     if (!stillSelected(p, selected.value)) selected.value = null;
     extraSelected.value = extraSelected.value.filter((s) => stillSelected(p, s));
     playhead.value = Math.min(playhead.value, Math.max(projectDuration(p) - 1, 0));
+    if (activeLoopId.value && !p.loops.some((l) => l.id === activeLoopId.value)) activeLoopId.value = null;
+    if (range.value) {
+      const total = projectDuration(p);
+      const r = { start: Math.min(range.value.start, total), end: Math.min(range.value.end, total) };
+      if (r.end - r.start < 100) setRange(null);
+      else if (!sameRange(r, range.value)) range.value = r;
+    }
   }
+
+  /** Select a span on the ruler (sorted and clamped); `null` clears it and stops looping. */
+  function setRange(r: Range | null) {
+    activeLoopId.value = null;
+    if (!r) { range.value = null; loopOn.value = false; return; }
+    const total = Math.max(duration.value, 0);
+    const start = Math.max(0, Math.min(r.start, r.end, total));
+    const end = Math.min(Math.max(r.start, r.end), total);
+    range.value = end - start < 100 ? null : { start, end };
+    if (!range.value) loopOn.value = false;
+  }
+  /** Load a pinned loop: it becomes the range, looping on, ready for Space to run it from the top. */
+  function selectLoop(id: string) {
+    const l = loops.value.find((l) => l.id === id); if (!l) return;
+    setRange({ start: l.start, end: l.end });
+    activeLoopId.value = id;
+    loopOn.value = true;
+    revealRange.value++;
+  }
+  /** Space: pause, or play. With a loop loaded, play starts from the loop's beginning (GarageBand's cycle). */
+  function togglePlay() {
+    if (playing.value) { playing.value = false; return; }
+    const r = loopRange.value;
+    if (r) seek(r.start);
+    playing.value = true;
+  }
+  function seek(ms: Ms) { playhead.value = Math.max(0, Math.min(ms, Math.max(duration.value - 1, 0))); }
 
   async function run<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
     busy.value[label] = true;
@@ -298,29 +364,28 @@ export const useProjectStore = defineStore("project", () => {
     async cancelAi() { if (aiJob.value?.id) await api.jobCancel(aiJob.value.id); },
     async setCueText(id: string, text: string) { await edit("caption", () => api.cueSetText(id, text)); },
     async deleteHighlight(id: string) { await edit("highlight", () => api.highlightDelete(id)); },
-    /** Builds the short as its own project file; returns its path. The open project is untouched. */
-    async applyHighlight(id: string) {
-      aiError.value = null;
-      try {
-        const path = await api.highlightApply(id);
-        notify(`Created ${basename(path)}`);
-        return path;
-      } catch (e) {
-        aiError.value = String(e);
-        return undefined;
-      }
-    },
 
     project, clips, overlays, texts, audioTracks, pool, duration, selected, selectedAll, selectedClipId, selectedClip, selectedIndex, selectedOverlay, selectedText, selectedAudio,
     playhead, playing, dirty, error, thumbs, waveforms, busy, current, currentOverlays, currentTexts, fonts, overlayLayers, layerAudio, activeAudioClips, poolDrag, poolView, timelineHeight, notice, notify,
 
-    async load() { const p = await api.projectGet(); apply(p, false); cacheAll(p); },
-    async newProject() { apply(await api.projectNew("Untitled"), false); dirty.value = false; playhead.value = 0; },
-    async open(path: string) {
-      await run("open", async () => { const p = await api.projectOpen(path); apply(p, false); cacheAll(p); });
-      dirty.value = false;
+    /** Launch: reopen the last project when it still opens, otherwise the fresh one Rust started with. */
+    async load() {
+      const last = lastProjectPath.value;
+      if (last) {
+        const p = await api.projectOpen(last).catch(() => null);
+        if (p) { apply(p, false); cacheAll(p); return; }
+        rememberPath(null);
+      }
+      const p = await api.projectGet(); apply(p, false); cacheAll(p);
     },
-    async save(path?: string) { const r = await run("save", () => api.projectSave(path)); if (r) dirty.value = false; return r; },
+    async newProject() { apply(await api.projectNew("Untitled"), false); dirty.value = false; playhead.value = 0; rememberPath(null); },
+    async open(path: string) {
+      const ok = await run("open", async () => { const p = await api.projectOpen(path); apply(p, false); cacheAll(p); return true; });
+      dirty.value = false;
+      if (ok) rememberPath(path);
+    },
+    async save(path?: string) { const r = await run("save", () => api.projectSave(path)); if (r) { dirty.value = false; rememberPath(r); } return r; },
+    lastProjectPath,
 
     /** Import: video also lands on V1 (and is selected); audio and images go to the pool only. */
     async importMedia(paths: string[]) {
@@ -417,15 +482,17 @@ export const useProjectStore = defineStore("project", () => {
     async overlayLayerSetAudio(layer: number, muted: boolean, volume: number) { await edit("layer", () => api.overlayLayerSetAudio(layer, muted, volume)); },
     async overlaySetPlacement(id: string, p: Placement) { await edit("placement", () => api.overlaySetPlacement(id, p)); },
 
-    /** + Text: a "Title" at `at`, selected so the Inspector opens on it. */
-    async textAdd(at: Ms, text = "Title") {
+    /** + Text: a "Title" at `at` on row `layer`, selected so the Inspector opens on it. */
+    async textAdd(at: Ms, text = "Title", layer = 0) {
       const before = new Set(texts.value.map((t) => t.id));
-      if (await edit("text", () => api.textAdd(text, at))) {
+      if (await edit("text", () => api.textAdd(text, at, layer))) {
         const t = texts.value.find((t) => !before.has(t.id));
         if (t) selected.value = { kind: "text", id: t.id };
       }
     },
-    async textMove(id: string, at: Ms) { await edit("move", () => api.textMove(id, at)); },
+    async textMove(id: string, at: Ms, layer: number) { await edit("move", () => api.textMove(id, at, layer)); },
+    async textLayerAdd() { await edit("layer", () => api.textLayerAdd()); },
+    async textLayerRemove(layer: number) { await edit("layer", () => api.textLayerRemove(layer)); },
     async textDelete(id: string) { await edit("delete", () => api.textDelete(id)); },
     async textTrim(id: string, duration: Ms) { await edit("trim", () => api.textTrim(id, duration)); },
     async textSetFades(id: string, fi: Ms, fo: Ms) { await edit("fades", () => api.textSetFades(id, fi, fo)); },
@@ -479,6 +546,36 @@ export const useProjectStore = defineStore("project", () => {
       selected.value = stillSelected(res.project, next) ? next : null;
       extraSelected.value = [];
     },
-    seek(ms: Ms) { playhead.value = Math.max(0, Math.min(ms, Math.max(duration.value - 1, 0))); },
+    seek,
+
+    // ---- range & pinned loops ----
+    range, loopOn, activeLoopId, loops, activeLoop, loopRange, loopsOpen, exportOpen, aiOpen, libraryWidth, loopsHeight, revealRange, textLayers,
+    /** Export short on a highlight card: select its span and open the Export dialog on it. */
+    exportRange(r: Range) { playing.value = false; setRange(r); exportOpen.value = true; },
+    setRange,
+    selectLoop,
+    togglePlay,
+    /** ▶ on a loop / highlight: play `r` on repeat from its start; pressed again while it plays, pause. */
+    playRange(r: Range, id: string | null = null) {
+      if (playing.value && loopOn.value && sameRange(range.value, r)) { playing.value = false; return; }
+      setRange(r);
+      if (!range.value) return;
+      activeLoopId.value = id;
+      loopOn.value = true;
+      seek(range.value.start);
+      playing.value = true;
+    },
+    /** Pin `r` (default: the current range) under `name`; the new loop becomes the active one. */
+    async loopAdd(name: string, r: Range | null = range.value) {
+      if (!r) return;
+      const before = new Set(loops.value.map((l) => l.id));
+      if (await edit("loop", () => api.loopAdd(name, r.start, r.end))) {
+        const l = loops.value.find((l) => !before.has(l.id));
+        if (l) { range.value = { start: l.start, end: l.end }; activeLoopId.value = l.id; revealRange.value++; }
+      }
+    },
+    async loopRemove(id: string) { await edit("loop", () => api.loopRemove(id)); },
+    /** Export in the drawer: select the loop and open the Export dialog on it. */
+    exportLoop(id: string) { playing.value = false; selectLoop(id); exportOpen.value = true; },
   };
 });

@@ -34,7 +34,13 @@ export const ASPECT_PRESETS: { id: AspectPreset; label: string; sub: string; w: 
   { id: "LinkedIn4x5", label: "LinkedIn", sub: "4:5", w: 1080, h: 1350 },
 ];
 
+/** `scale` 1 fills the frame; up to CROP_SCALE_MAX zooms in, down to CROP_SCALE_MIN zooms out onto black. */
 export interface Crop { scale: number; x: number; y: number }
+export const CROP_SCALE_MIN = 0.25;
+export const CROP_SCALE_MAX = 4;
+/** The Inspector's zoom slider: -100 … 0 … 100 ↔ CROP_SCALE_MIN … 1 … CROP_SCALE_MAX. */
+export const zoomToScale = (z: number) => (z >= 0 ? 1 + (CROP_SCALE_MAX - 1) * (z / 100) : 1 - (1 - CROP_SCALE_MIN) * (-z / 100));
+export const scaleToZoom = (s: number) => (s >= 1 ? ((s - 1) / (CROP_SCALE_MAX - 1)) * 100 : -((1 - s) / (1 - CROP_SCALE_MIN)) * 100);
 
 export type Transition =
   | { type: "None" }
@@ -106,10 +112,11 @@ export const TEXT_STYLE_DEFAULT: TextStyle = { text: "Title", font: TEXT_DEFAULT
 export const TEXT_SIZE_MIN = 0.02;
 export const TEXT_SIZE_MAX = 0.4;
 
-/** A title on the text track (T1): centred at x/y (normalised), burned in above every overlay. */
+/** A title on a text row (`layer` 0 = T1): centred at x/y (normalised), burned in above every overlay. */
 export interface TextClip {
   id: string;
   name?: string | null;
+  layer: number;
   style: TextStyle;
   timeline_start: Ms;
   duration: Ms;
@@ -152,6 +159,9 @@ export interface PoolItem { id: string; path: string; media: MediaInfo }
 export interface Cue { id: string; start: Ms; end: Ms; text: string }
 export interface Transcript { source: string; cues: Cue[] }
 export interface Range { start: Ms; end: Ms }
+/** A pinned span of the timeline (timeline time; clamped, never shifted, by edits). */
+export interface Loop { id: string; name: string; start: Ms; end: Ms }
+export const sameRange = (a: Range | null | undefined, b: Range | null | undefined) => !!a && !!b && a.start === b.start && a.end === b.end;
 /** A section worth cutting into a short, with the plan to build it. Timeline time. */
 export interface Highlight {
   id: string;
@@ -179,8 +189,10 @@ export interface Project {
   overlay_layers: number;
   /** One entry per overlay row; Rust keeps it the same length as `overlay_layers`. */
   overlay_audio: LayerAudio[];
-  /** Titles on the single text track. */
+  /** Titles on the text rows T1, T2, … */
   texts: TextClip[];
+  /** Number of text rows shown (≥ 1). */
+  text_layers: number;
   /** Track-level mute for V1. */
   video_muted: boolean;
   /** V1 fader 0–1, multiplied into each clip's volume. */
@@ -191,13 +203,15 @@ export interface Project {
   /** Off = caption row dimmed, no preview caption, no .srt on export. Old files load as on. */
   captions_enabled: boolean;
   highlights: Highlight[];
+  loops: Loop[];
   fps: Rational | null;
 }
 
 export type Quality = "Draft" | "Standard" | "High";
 export type Strategy = "StreamCopy" | "HardwareEncode" | "AudioOnly";
 
-export interface ExportSettings { destination: string; quality: Quality; audio_only: boolean }
+/** `range` renders only that span of the timeline (a pinned loop or the current selection). */
+export interface ExportSettings { destination: string; quality: Quality; audio_only: boolean; range: Range | null }
 
 export interface ExportPlan {
   strategy: Strategy;

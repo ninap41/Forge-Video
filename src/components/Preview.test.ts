@@ -84,6 +84,17 @@ describe("Preview", () => {
     expect(px(v().left)).toBeCloseTo(0, 2);
     expect(px(v().top)).toBeCloseTo(-(540 - 270) * k, 2);
     expect(px(v().width)).toBeCloseTo(1920 * k, 2);
+    // zoom out to 0.5×: the source is half the window's size, centred on the frame
+    store.project!.crop = { scale: 0.5, x: 0.5, y: 0.5 };
+    await w.vm.$nextTick();
+    const k2 = (253.125 / 607.5) * 0.5;
+    expect(px(v().width)).toBeCloseTo(1920 * k2, 2);
+    expect(px(v().left)).toBeCloseTo(253.125 / 2 - 960 * k2, 2);
+    expect(px(v().top)).toBeCloseTo(450 / 2 - 540 * k2, 2);
+    // and with x = 0 it is not clamped: its left edge sits at the frame centre, half of it off-frame
+    store.project!.crop = { scale: 0.5, x: 0, y: 0.5 };
+    await w.vm.$nextTick();
+    expect(px(v().left)).toBeCloseTo(253.125 / 2, 2);
   });
 
   it("uses the rotated display size for portrait phone footage", async () => {
@@ -128,10 +139,10 @@ describe("Preview", () => {
     vi.advanceTimersByTime(250);
     expect(api.setCrop).toHaveBeenCalledTimes(2);
     expect(api.setCrop).toHaveBeenLastCalledWith(expect.objectContaining({ scale: expect.closeTo(1.1025, 4) }));
-    // zoom never drops below 1
-    for (let i = 0; i < 10; i++) await frame.trigger("wheel", { deltaY: 100 });
+    // zooming out goes below 1 and stops at 0.25
+    for (let i = 0; i < 60; i++) await frame.trigger("wheel", { deltaY: 100 });
     vi.advanceTimersByTime(250);
-    expect(api.setCrop).toHaveBeenLastCalledWith(expect.objectContaining({ scale: 1 }));
+    expect(api.setCrop).toHaveBeenLastCalledWith(expect.objectContaining({ scale: 0.25 }));
     vi.useRealTimers();
   });
 
@@ -344,6 +355,46 @@ describe("Preview", () => {
     expect(w.find("video").exists()).toBe(true);
     store.playing = false;
     vi.useRealTimers();
+  });
+
+  it("looping a range wraps the playhead back to its start instead of moving on", async () => {
+    vi.useFakeTimers();
+    const card = clip({ id: "card", source: "/images/title.png", media: stillMedia(), source_end: 3000 });
+    const { store, w } = await setup(project([card, clip({ id: "b", source: "/v/b.mp4" })]));
+    store.setRange({ start: 500, end: 1000 });
+    store.loopOn = true;
+    store.playhead = 0;
+    await w.vm.$nextTick();
+    store.playing = true; // outside the range: playback starts at the range start
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.playhead).toBe(500);
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(store.playing).toBe(true);
+    expect(store.playhead).toBeGreaterThanOrEqual(500);
+    expect(store.playhead).toBeLessThan(1000);
+    expect(store.current?.clip.id).toBe("card");
+    // loop off: the still runs to its end and hands over to the next clip
+    store.loopOn = false;
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(store.current?.clip.id).toBe("b");
+    store.playing = false;
+    vi.useRealTimers();
+  });
+
+  it("a video clip ending inside a loop at the end of the timeline wraps instead of stopping", async () => {
+    const { store, w } = await setup(project([clip({ id: "a" })])); // 5 s
+    await w.vm.$nextTick();
+    const video = w.find("video").element as HTMLVideoElement;
+    store.setRange({ start: 2000, end: 5000 });
+    store.loopOn = true;
+    store.playhead = 4000;
+    store.playing = true;
+    await flush();
+    Object.defineProperty(video, "currentTime", { value: 4.995, writable: true, configurable: true });
+    await flush();
+    expect(store.playing).toBe(true);
+    expect(store.playhead).toBe(2000);
+    store.playing = false;
   });
 
   it("a muted video track silences the <video> even when the clip itself is not muted", async () => {

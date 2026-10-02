@@ -17,7 +17,9 @@ fn even(v: f64) -> u32 {
     ((v / 2.0).round() as u32 * 2).max(2)
 }
 
-/// crop=w:h:x:y,scale=W:H for this clip given the project crop and output preset.
+/// The framing stage for this clip given the project crop and output preset: zoomed in,
+/// `crop=w:h:x:y,scale=W:H`; zoomed out (scale < 1), the source is shrunk, padded with black on a
+/// canvas big enough for any offset, then the frame is cut out so the picture can sit partly outside.
 pub fn crop_scale_filter(p: &Project, c: &Clip) -> String {
     let (ow, oh) = p.aspect.dimensions();
     let (sw, sh) = c.media.display_size();
@@ -29,7 +31,18 @@ pub fn crop_scale_filter(p: &Project, c: &Clip) -> String {
     // Largest region of the source with the target aspect, then zoom by `scale`.
     let base_w = sw.min(sh * target);
     let base_h = base_w / target;
-    let scale = p.crop.scale.max(1.0) as f64;
+    let scale = (p.crop.scale as f64).max(crate::project::CROP_SCALE_MIN as f64);
+    if scale < 1.0 {
+        // Output pixels per source pixel; the source point (x, y) lands at the frame centre.
+        let k = ow as f64 / base_w * scale;
+        let (w, h) = (even(sw * k), even(sh * k));
+        let ox = ow as f64 / 2.0 - p.crop.x as f64 * sw * k;
+        let oy = oh as f64 / 2.0 - p.crop.y as f64 * sh * k;
+        return format!(
+            "scale={w}:{h}:flags=bicubic,pad={}:{}:{ow}:{oh}:black,crop={ow}:{oh}:{}:{}",
+            w + 2 * ow, h + 2 * oh, (ow as f64 - ox).round().clamp(0.0, (w + ow) as f64) as u32, (oh as f64 - oy).round().clamp(0.0, (h + oh) as f64) as u32
+        );
+    }
     let cw = base_w / scale;
     let ch = base_h / scale;
     let cx = (p.crop.x as f64 * sw).clamp(cw / 2.0, sw - cw / 2.0);
@@ -326,9 +339,21 @@ pub fn build_args_with_texts(p: &Project, s: &ExportSettings, texts: &[TextRaste
         cur_a = "amix".into();
     }
 
-    filters.push(format!("[{cur_a}]atrim=end={}[aout]", f(cur_len)));
-    if !s.audio_only {
-        filters.push(format!("[{cur_v}]trim=end={}[vout]", f(cur_len)));
+    // A range export cuts the finished graph, so every `enable=between(t,…)` above stays in
+    // timeline time; the planner has already validated the span.
+    match crate::render::planner::export_span(p, s) {
+        Ok((start, end)) if s.range.is_some() => {
+            filters.push(format!("[{cur_a}]atrim=start={}:end={},asetpts=PTS-STARTPTS[aout]", f(start), f(end)));
+            if !s.audio_only {
+                filters.push(format!("[{cur_v}]trim=start={}:end={},setpts=PTS-STARTPTS[vout]", f(start), f(end)));
+            }
+        }
+        _ => {
+            filters.push(format!("[{cur_a}]atrim=end={}[aout]", f(cur_len)));
+            if !s.audio_only {
+                filters.push(format!("[{cur_v}]trim=end={}[vout]", f(cur_len)));
+            }
+        }
     }
 
     args.push("-filter_complex".into());
@@ -366,7 +391,7 @@ mod tests {
         }
     }
     fn settings() -> ExportSettings {
-        ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false }
+        ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false, range: None }
     }
     fn add_music(p: &mut Project, dur: Ms, at: Ms) -> uuid::Uuid {
         let t = timeline::audio_track_add(p, "Music");
@@ -476,7 +501,7 @@ mod more_tests {
         }
     }
     fn settings() -> ExportSettings {
-        ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false }
+        ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false, range: None }
     }
     fn filter_of(args: &[String]) -> String {
         let i = args.iter().position(|a| a == "-filter_complex").unwrap();
@@ -538,8 +563,28 @@ mod more_tests {
         p.crop = Crop { scale: 2.0, x: 1.0, y: 1.0 };
         // 960x540 window pinned to the bottom-right corner
         assert_eq!(crop_scale_filter(&p, &c), "crop=960:540:960:540,scale=1920:1080:flags=bicubic");
+    }
+
+    #[test]
+    fn zooming_out_shrinks_the_source_onto_black_and_lets_it_leave_the_frame() {
+        let mut p = Project::new("t");
+        let c = Clip::new(PathBuf::from("/a.mp4"), media(1920, 1080));
+        // half size, centred: 960x540 on a 1920x1080 frame, padded canvas 4800x2700, frame cut at (1440, 810)
         p.crop = Crop { scale: 0.5, x: 0.5, y: 0.5 };
-        assert_eq!(crop_scale_filter(&p, &c), "crop=1920:1080:0:0,scale=1920:1080:flags=bicubic", "scale below 1 is treated as 1");
+        assert_eq!(crop_scale_filter(&p, &c), "scale=960:540:flags=bicubic,pad=4800:2700:1920:1080:black,crop=1920:1080:1440:810");
+        // x = 0: the source's left edge sits at the frame centre, so half of it hangs off the right
+        p.crop = Crop { scale: 0.5, x: 0.0, y: 0.5 };
+        assert_eq!(crop_scale_filter(&p, &c), "scale=960:540:flags=bicubic,pad=4800:2700:1920:1080:black,crop=1920:1080:960:810");
+        // x = 1: the right edge at the centre, half off the left
+        p.crop = Crop { scale: 0.5, x: 1.0, y: 1.0 };
+        assert_eq!(crop_scale_filter(&p, &c), "scale=960:540:flags=bicubic,pad=4800:2700:1920:1080:black,crop=1920:1080:1920:1080");
+        // 9:16 preset: the base window is 607.5 wide, so k = 1080 / 607.5 × 0.25
+        p.aspect = AspectPreset::Shorts9x16;
+        p.crop = Crop { scale: 0.25, x: 0.5, y: 0.5 };
+        assert_eq!(crop_scale_filter(&p, &c), "scale=854:480:flags=bicubic,pad=3014:4320:1080:1920:black,crop=1080:1920:967:1200");
+        // anything below the floor behaves like the floor
+        p.crop = Crop { scale: 0.01, x: 0.5, y: 0.5 };
+        assert_eq!(crop_scale_filter(&p, &c), "scale=854:480:flags=bicubic,pad=3014:4320:1080:1920:black,crop=1080:1920:967:1200");
     }
 
     #[test]
@@ -809,7 +854,7 @@ mod more_tests {
         timeline::overlay_add(&mut p, OverlayClip::new(PathBuf::from("/l.png"), still_media()), 0, 0);
         let mut t = TextClip::new("Hi");
         t.fade_in = 250; t.fade_out = 500; t.x = 0.5; t.y = 0.9;
-        let id = timeline::text_add(&mut p, t, 1000);
+        let id = timeline::text_add(&mut p, t, 1000, 0);
         timeline::text_trim(&mut p, id, 3000).unwrap();
         // no raster → the title is skipped, not an error
         assert_eq!(build_args(&p, &settings()).iter().filter(|a| *a == "-i").count(), 3);
@@ -826,8 +871,23 @@ mod more_tests {
         let mut a = settings(); a.audio_only = true;
         assert_eq!(build_args_with_texts(&p, &a, &rasters).iter().filter(|x| *x == "-i").count(), 2);
         // a title after V1 ends is left out
-        timeline::text_move(&mut p, id, 20_000).unwrap();
+        timeline::text_move(&mut p, id, 20_000, 0).unwrap();
         assert_eq!(build_args_with_texts(&p, &settings(), &rasters).iter().filter(|a| *a == "-i").count(), 3);
+    }
+
+    #[test]
+    fn range_trims_the_finished_graph_and_resets_timestamps() {
+        let p = two_clips();
+        let mut s = settings();
+        s.range = Some(crate::project::Range { start: 1000, end: 3000 });
+        let fc = filter_of(&build_args(&p, &s));
+        assert!(fc.ends_with("atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[aout];[vx1]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[vout]"), "{fc}");
+        s.audio_only = true;
+        let fc = filter_of(&build_args(&p, &s));
+        assert!(fc.ends_with("atrim=start=1.000:end=3.000,asetpts=PTS-STARTPTS[aout]"), "{fc}");
+        assert!(!fc.contains("[vout]"));
+        let fc = filter_of(&build_args(&p, &settings()));
+        assert!(fc.ends_with("[ax1]atrim=end=10.000[aout];[vx1]trim=end=10.000[vout]"), "no range: the old tail: {fc}");
     }
 
     #[test]

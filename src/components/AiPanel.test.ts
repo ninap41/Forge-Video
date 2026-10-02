@@ -10,8 +10,6 @@ vi.mock("../api/tauri", async () => {
 });
 import { api as apiModule } from "../api/tauri";
 const api = apiModule as unknown as MockApi;
-const reveal = vi.fn();
-vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: (...a: unknown[]) => reveal(...(a as [])) }));
 
 import AiPanel from "./AiPanel.vue";
 import { useProjectStore } from "../stores/project";
@@ -46,7 +44,6 @@ beforeEach(() => {
   api.onJobProgress.mockImplementation((cb: (e: JobProgress) => void) => { progressCb = cb; return Promise.resolve(() => {}); });
   api.onJobDone.mockImplementation((cb: (e: JobDone) => void) => { doneCb = cb; return Promise.resolve(() => {}); });
   api.onJobError.mockImplementation((cb: (e: JobError) => void) => { errorCb = cb; return Promise.resolve(() => {}); });
-  reveal.mockReset();
 });
 
 describe("AiPanel", () => {
@@ -273,39 +270,46 @@ describe("AiPanel", () => {
     expect(cards[0].text()).toContain("0:12–1:05 · 53 s");
     expect(cards[0].text()).toContain("Hook and payoff");
     expect(cards[0].findAll("[data-testid=plan] li").map((l) => l.text())).toEqual([
-      "New project in Shorts / Reels 9:16", "Keep 0:12–0:20, 0:55–1:05 (18 s)", "Cut 35 s of filler", "Fade in 0.3 s · Fade out 0.8 s", "Captions carried over",
+      "Keep 0:12–0:20, 0:55–1:05 (18 s)", "Cut 35 s of filler", "Fade in 0.3 s · Fade out 0.8 s", "Captions come along in the .srt",
     ]);
     expect(cards[0].text()).toContain("By hand: Add a title card");
-    expect(cards[1].findAll("[data-testid=plan] li").map((l) => l.text())).toEqual(["New project in Shorts / Reels 9:16", "Keep 0:01–0:08 (7 s)", "Captions carried over"]);
+    expect(cards[1].findAll("[data-testid=plan] li").map((l) => l.text())).toEqual(["Keep 0:01–0:08 (7 s)", "Captions come along in the .srt"]);
     store.playing = true;
     await cards[0].find("button[title='Show on the timeline']").trigger("click");
     expect(store.playhead).toBe(12_000);
     expect(store.playing).toBe(false);
+    expect(store.range).toEqual({ start: 12_000, end: 65_000 });
     expect(w.text()).toContain("Find again");
   });
 
-  it("creates a short, then offers to open or reveal it", async () => {
-    const { store, w } = await setup(project([talk()], { transcripts: transcript(), highlights: [highlight({ id: "h1" })] }));
-    await btn(w, "Create short").trigger("click");
+  it("▶ loops the highlight's span (again = pause) and Pin loop keeps it in Pinned loops", async () => {
+    const h = highlight({ id: "h1", title: "The hook", start: 12_000, end: 65_000 });
+    const { store, w } = await setup(project([talk()], { transcripts: transcript(), highlights: [h] }));
+    const card = w.find("[data-testid=highlight]");
+    await card.find("[data-testid=hl-play]").trigger("click");
+    expect([store.playing, store.loopOn, store.playhead, store.range]).toEqual([true, true, 12_000, { start: 12_000, end: 65_000 }]);
+    await w.vm.$nextTick();
+    expect(card.find("[data-testid=hl-play]").text()).toBe("❚❚");
+    await card.find("[data-testid=hl-play]").trigger("click");
+    expect(store.playing).toBe(false);
+    expect(card.find("[data-testid=hl-pin]").text()).toBe("Pin loop");
+    api.loopAdd.mockImplementationOnce(() => Promise.resolve({ ...store.project!, loops: [{ id: "l1", name: "The hook", start: 12_000, end: 65_000 }] }));
+    await card.find("[data-testid=hl-pin]").trigger("click");
     await flush();
-    expect(api.highlightApply).toHaveBeenCalledWith("h1");
-    expect(store.notice).toBe("Created Test - The hook.forgevideo");
-    expect(store.dirty).toBe(false);
-    expect(w.text()).toContain("Test - The hook.forgevideo");
-    expect(btn(w, "Create short")).toBeUndefined();
-    await btn(w, "Open").trigger("click");
-    expect(w.emitted("open-project")).toEqual([["/v/Test - The hook.forgevideo"]]);
-    await btn(w, "Reveal in Finder").trigger("click");
-    expect(reveal).toHaveBeenCalledWith("/v/Test - The hook.forgevideo");
+    expect(api.loopAdd).toHaveBeenCalledWith("The hook", 12_000, 65_000);
+    expect(store.activeLoopId).toBe("l1");
+    expect(card.find("[data-testid=hl-pin]").text()).toBe("Pinned");
+    expect(card.find("[data-testid=hl-pin]").attributes("disabled")).toBeDefined();
   });
 
-  it("explains why a short could not be created, and dismisses highlights", async () => {
-    const { w } = await setup(project([talk()], { transcripts: transcript(), highlights: [highlight({ id: "h1", title: "Hook" })] }));
-    api.highlightApply.mockImplementationOnce(() => Promise.reject("invalid edit: save this project first, shorts are created next to it"));
-    await btn(w, "Create short").trigger("click");
-    await flush();
-    expect(w.find("[data-testid=ai-error]").text()).toContain("save this project first");
-    expect(btn(w, "Create short")).toBeDefined();
+  it("Export short selects the highlight's span and opens the Export dialog on it; ✕ dismisses", async () => {
+    const { store, w } = await setup(project([talk()], { transcripts: transcript(), highlights: [highlight({ id: "h1", title: "Hook", start: 12_000, end: 65_000 })] }));
+    store.playing = true;
+    await w.find("[data-testid=hl-export]").trigger("click");
+    expect(store.exportOpen).toBe(true);
+    expect(store.range).toEqual({ start: 12_000, end: 65_000 });
+    expect(store.playing).toBe(false);
+    expect(api.highlightApply).not.toHaveBeenCalled();
     await w.find("button[aria-label='Dismiss Hook']").trigger("click");
     expect(api.highlightDelete).toHaveBeenCalledWith("h1");
   });

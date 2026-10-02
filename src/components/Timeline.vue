@@ -4,7 +4,6 @@ import { CAPTIONS_SELECTION, useProjectStore } from "../stores/project";
 import ClipBlock from "./ClipBlock.vue";
 import FreeBlock from "./FreeBlock.vue";
 import TextBlock from "./TextBlock.vue";
-import MediaPool from "./MediaPool.vue";
 import MuteToggle from "./MuteToggle.vue";
 import { clipDuration, clipEnd, clipName, mediaKind } from "../types/project";
 import type { AudioClip, Clip, OverlayClip, PoolItem, TextClip } from "../types/project";
@@ -40,14 +39,17 @@ type Drag =
   | { kind: "move"; clip: Clip; x0: number; dx: number; moved: boolean }
   | { kind: "freeTrimStart" | "freeTrimEnd"; free: FreeRef; x0: number; s0: number; e0: number; s: number; e: number }
   | { kind: "freeMove"; free: FreeRef; x0: number; dx: number; moved: boolean; trackId?: string; layer?: number }
-  | { kind: "textMove"; text: TextClip; x0: number; dx: number; moved: boolean }
+  | { kind: "textMove"; text: TextClip; x0: number; dx: number; moved: boolean; layer?: number }
   | { kind: "textTrimStart" | "textTrimEnd"; text: TextClip; x0: number; start: number; duration: number }
-  | { kind: "scrub" };
+  | { kind: "scrub" }
+  /** Ruler press: a plain click scrubs; once it moves it selects a range from `anchor`. */
+  | { kind: "ruler"; x0: number; anchor: number; ranging: boolean }
+  | { kind: "rangeStart" | "rangeEnd"; x0: number; other: number };
 const drag = ref<Drag | null>(null);
 
 const displayClips = computed(() => {
   const d = drag.value;
-  if (!d || d.kind === "scrub" || d.kind.startsWith("free") || d.kind.startsWith("text")) return store.clips;
+  if (!d || d.kind === "scrub" || d.kind === "ruler" || d.kind.startsWith("range") || d.kind.startsWith("free") || d.kind.startsWith("text")) return store.clips;
   if (d.kind === "move") {
     return store.clips.map((c) => (c.id === d.clip.id ? { ...c, timeline_start: c.timeline_start + d.dx } : c));
   }
@@ -75,18 +77,20 @@ function withDrag<T extends OverlayClip | AudioClip>(list: T[], kind: "overlay" 
     return { ...c, source_start: dd.s, source_end: dd.e, timeline_start: Math.max(0, c.timeline_start + shift) };
   });
 }
-/** Titles with the in-flight drag applied. */
+/** Titles with the in-flight drag applied (a cross-row move is drawn on its target row). */
 const displayTexts = computed(() => {
   const d = drag.value;
   if (!d || !d.kind.startsWith("text")) return store.texts;
   const t = (d as { text: TextClip }).text;
   return store.texts.map((x) => {
     if (x.id !== t.id) return x;
-    if (d.kind === "textMove") return { ...x, timeline_start: Math.max(0, x.timeline_start + d.dx) };
+    if (d.kind === "textMove") return { ...x, timeline_start: Math.max(0, x.timeline_start + d.dx), layer: d.layer ?? x.layer };
     const dd = d as { start: number; duration: number };
     return { ...x, timeline_start: dd.start, duration: dd.duration };
   });
 });
+/** One row per text layer (T1 = 0). */
+const displayTextLayers = computed(() => Array.from({ length: store.textLayers }, (_, layer) => ({ layer, clips: displayTexts.value.filter((t) => t.layer === layer) })));
 /** One row per overlay layer, with an in-flight cross-layer drag drawn on its target row. */
 const displayLayers = computed(() => {
   const d = drag.value;
@@ -145,7 +149,7 @@ function startFreeMove(free: FreeRef, e: PointerEvent) {
   capture(e);
 }
 function startTextMove(text: TextClip, e: PointerEvent) {
-  drag.value = { kind: "textMove", text, x0: e.clientX, dx: 0, moved: false };
+  drag.value = { kind: "textMove", text, x0: e.clientX, dx: 0, moved: false, layer: text.layer };
   capture(e);
 }
 function startTextTrim(text: TextClip, e: PointerEvent, kind: "textTrimStart" | "textTrimEnd") {
@@ -158,6 +162,26 @@ function startScrub(e: PointerEvent) {
   store.seek(xToMs(e.clientX));
   capture(e);
 }
+/** The ruler: click to scrub, drag to select a range (GarageBand's cycle region). */
+function startRuler(e: PointerEvent) {
+  const anchor = xToMs(e.clientX);
+  drag.value = { kind: "ruler", x0: e.clientX, anchor, ranging: false };
+  store.playing = false;
+  store.seek(anchor);
+  capture(e);
+}
+function startRangeHandle(e: PointerEvent, kind: "rangeStart" | "rangeEnd") {
+  const r = store.range; if (!r) return;
+  drag.value = { kind, x0: e.clientX, other: kind === "rangeStart" ? r.end : r.start };
+  capture(e);
+}
+/** Range edges snap to clip boundaries and the playhead like free clips do. */
+function snapPoint(t: number) {
+  const targets = [0, store.duration, store.playhead, ...store.clips.flatMap((c) => [c.timeline_start, clipEnd(c)])];
+  const tol = SNAP_PX / pxPerMs.value;
+  const hit = targets.find((s) => Math.abs(t - s) <= tol);
+  return clamp(hit ?? t, 0, store.duration);
+}
 function capture(e: PointerEvent) { (scroller.value as HTMLElement).setPointerCapture(e.pointerId); }
 
 function rowAt(clientY: number): string | null {
@@ -169,8 +193,22 @@ function rowAt(clientY: number): string | null {
 function onMove(e: PointerEvent) {
   const d = drag.value; if (!d) return;
   if (d.kind === "scrub") { store.seek(xToMs(e.clientX)); return; }
+  if (d.kind === "ruler") {
+    if (!d.ranging && Math.abs(e.clientX - d.x0) <= 4) { store.seek(xToMs(e.clientX)); return; }
+    d.ranging = true;
+    const t = snapPoint(xToMs(e.clientX));
+    store.setRange({ start: Math.min(d.anchor, t), end: Math.max(d.anchor, t) });
+    return;
+  }
+  if (d.kind === "rangeStart") { const t = snapPoint(xToMs(e.clientX)); store.setRange({ start: Math.min(t, d.other - MIN_CLIP), end: d.other }); return; }
+  if (d.kind === "rangeEnd") { const t = snapPoint(xToMs(e.clientX)); store.setRange({ start: d.other, end: Math.max(t, d.other + MIN_CLIP) }); return; }
   const dms = (e.clientX - d.x0) / pxPerMs.value;
-  if (d.kind === "textMove") { d.dx = dms; if (Math.abs(e.clientX - d.x0) > 4) d.moved = true; return; }
+  if (d.kind === "textMove") {
+    d.dx = dms; if (Math.abs(e.clientX - d.x0) > 4) d.moved = true;
+    const row = rowAt(e.clientY);
+    if (row?.startsWith("text:")) d.layer = Number(row.slice(5));
+    return;
+  }
   if (d.kind === "textTrimEnd") { d.duration = Math.max(MIN_CLIP, Math.round((d.text.duration + dms) / 10) * 10); return; }
   if (d.kind === "textTrimStart") {
     const start = clamp(Math.round((d.text.timeline_start + dms) / 10) * 10, 0, d.text.timeline_start + d.text.duration - MIN_CLIP);
@@ -196,7 +234,13 @@ function onMove(e: PointerEvent) {
 }
 async function onUp() {
   const d = drag.value; drag.value = null;
-  if (!d || d.kind === "scrub") return;
+  if (!d || d.kind === "scrub" || d.kind === "rangeStart" || d.kind === "rangeEnd") return;
+  if (d.kind === "ruler") {
+    // A plain click outside the yellow band clears it; inside, it only scrubbed.
+    const r = store.range;
+    if (!d.ranging && r && (d.anchor < r.start || d.anchor > r.end)) store.setRange(null);
+    return;
+  }
   if (d.kind === "move") {
     if (!d.moved) return;
     const centre = d.clip.timeline_start + d.dx + clipDuration(d.clip) / 2;
@@ -208,13 +252,13 @@ async function onUp() {
   }
   if (d.kind === "textMove") {
     if (!d.moved) return;
-    await store.textMove(d.text.id, Math.round(snapFree(d.text.timeline_start + d.dx, d.text.duration)));
+    await store.textMove(d.text.id, Math.round(snapFree(d.text.timeline_start + d.dx, d.text.duration)), d.layer ?? d.text.layer);
     return;
   }
   if (d.kind === "textTrimStart" || d.kind === "textTrimEnd") {
     if (d.start === d.text.timeline_start && d.duration === d.text.duration) return;
     await store.textTrim(d.text.id, d.duration);
-    if (d.start !== d.text.timeline_start) await store.textMove(d.text.id, d.start);
+    if (d.start !== d.text.timeline_start) await store.textMove(d.text.id, d.start, d.text.layer);
     return;
   }
   if (d.kind === "freeMove") {
@@ -253,7 +297,7 @@ async function onPoolDrop(row: string, e: CustomEvent<{ item: PoolItem; clientX:
   const { item, clientX } = e.detail;
   if (!poolAccepts(row, item)) {
     const k = mediaKind(item.media);
-    if (row === "text") store.notify("The text track only holds titles — press + Text to add one");
+    if (row.startsWith("text")) store.notify("Text rows only hold titles — press + Text to add one");
     else if (k === "Audio") store.notify("Audio goes on an audio track — drop it on a ♪ row");
     else if (item.media.has_audio) store.notify("Video and images go on V1 or a video track");
     else store.notify(`${basename(item.path)} has no audio — video and images go on V1 or a video track`);
@@ -280,6 +324,14 @@ watch(() => store.playhead, (t) => {
   const el = scroller.value; if (!el || !store.playing) return;
   const x = t * pxPerMs.value + PAD;
   if (x < el.scrollLeft + 40 || x > el.scrollLeft + el.clientWidth - 40) el.scrollLeft = x - el.clientWidth / 3;
+});
+
+/** A loop was pinned or picked: bring its start into view (a little left of it) unless it is already visible. */
+watch(() => store.revealRange, () => {
+  const el = scroller.value, r = store.range; if (!el || !r) return;
+  const x0 = r.start * pxPerMs.value + PAD, x1 = r.end * pxPerMs.value + PAD;
+  if (x0 >= el.scrollLeft && x1 <= el.scrollLeft + el.clientWidth) return;
+  el.scrollLeft = Math.max(0, x0 - 40);
 });
 
 const ro = new ResizeObserver(([e]) => { viewW.value = e.contentRect.width; });
@@ -315,6 +367,7 @@ const TRACK_TYPES = [
   { label: "Music", hint: "Audio track for music beds" },
   { label: "Narration", hint: "Audio track for voice-over" },
   { label: "SFX", hint: "Audio track for sound effects" },
+  { label: "Text", hint: "Another row of titles, drawn above the rows below it" },
 ] as const;
 const addMenu = ref<{ x: number; y: number } | null>(null);
 function toggleAddMenu(e: MouseEvent) {
@@ -324,6 +377,7 @@ function toggleAddMenu(e: MouseEvent) {
 async function addTrack(label: (typeof TRACK_TYPES)[number]["label"]) {
   addMenu.value = null;
   if (label === "Video") await store.overlayLayerAdd();
+  else if (label === "Text") await store.textLayerAdd();
   else await store.audioTrackAdd(label);
 }
 
@@ -332,7 +386,12 @@ function onWindowDown(e: Event) {
   if (menu.value && !t.closest("[data-testid=clip-menu]")) menu.value = null;
   if (addMenu.value && !t.closest("[data-testid=add-track-menu], [data-testid=add-track]")) addMenu.value = null;
 }
-function onWindowKey(e: KeyboardEvent) { if (e.key === "Escape") { menu.value = null; addMenu.value = null; } }
+function onWindowKey(e: KeyboardEvent) {
+  if (e.key !== "Escape") return;
+  if (menu.value || addMenu.value) { menu.value = null; addMenu.value = null; return; }
+  const tag = (e.target as HTMLElement).tagName;
+  if (tag !== "INPUT" && tag !== "TEXTAREA" && !store.exportOpen) store.setRange(null);
+}
 onMounted(() => { window.addEventListener("pointerdown", onWindowDown); window.addEventListener("keydown", onWindowKey); });
 onBeforeUnmount(() => { window.removeEventListener("pointerdown", onWindowDown); window.removeEventListener("keydown", onWindowKey); });
 
@@ -344,11 +403,12 @@ function commitLabel(trackId: string, e: Event, muted: boolean, volume: number) 
   editingLabel.value = null;
   void store.audioTrackUpdate(trackId, (e.target as HTMLInputElement).value, muted, volume);
 }
-/** The text track sits at the very top: titles composite above every overlay layer. */
+/** Text rows sit at the very top: titles composite above every overlay layer, higher rows on top. */
 const textTop = ROW.ruler + ROW.gap;
-const overlaysTop = textTop + ROW.text + ROW.gap;
+const textsH = computed(() => store.textLayers * (ROW.text + ROW.gap));
+const overlaysTop = computed(() => textTop + textsH.value);
 const overlaysH = computed(() => store.overlayLayers * (ROW.overlay + ROW.gap));
-const videoTop = computed(() => overlaysTop + overlaysH.value);
+const videoTop = computed(() => overlaysTop.value + overlaysH.value);
 /** Captions sit right under V1. The row only exists once something has been transcribed. */
 const captionTop = computed(() => videoTop.value + ROW.video + ROW.gap);
 const hasCaptions = computed(() => store.cues.length > 0);
@@ -365,6 +425,8 @@ const isSelected = (kind: "clip" | "overlay" | "audio" | "text", id: string) => 
 /** Merge is offered when the right-clicked clip is one of two or more selected pieces on its row. */
 const mergeCount = computed(() => (menu.value && menu.value.kind !== "text" && isSelected(menu.value.kind, menu.value.clip.id) ? store.selectedAll.length : 0));
 async function mergeSelected() { menu.value = null; await store.mergeSelected(); }
+/** Pixel box of the yellow range band. */
+const rangeBox = computed(() => (store.range ? { left: store.range.start * pxPerMs.value + PAD, width: (store.range.end - store.range.start) * pxPerMs.value } : null));
 const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "ring-1 ring-inset ring-accent/60 bg-accent/5" : "opacity-40");
 </script>
 
@@ -374,21 +436,35 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
       <span class="font-mono text-fg w-20">{{ fmtMs(store.playhead) }}</span>
       <span>/ {{ fmtMs(store.duration) }}</span>
       <span class="ml-2">{{ store.clips.length }} clip{{ store.clips.length === 1 ? '' : 's' }}</span>
+      <template v-if="store.range">
+        <span class="ml-2 font-mono text-yellow-400" data-testid="range-label">{{ fmtMs(store.range.start, false) }}–{{ fmtMs(store.range.end, false) }}</span>
+        <button
+          data-testid="loop-toggle" class="rounded border px-1.5 py-0.5" :class="store.loopOn ? 'border-yellow-400 text-yellow-400 bg-yellow-400/10' : 'border-line hover:text-fg'"
+          :aria-pressed="store.loopOn" title="Loop the selected range (L)" @click="store.loopOn = !store.loopOn"
+        >⟳ Loop</button>
+        <button data-testid="pin-range" class="rounded border border-line px-1.5 py-0.5 hover:text-fg" title="Keep this range in Pinned loops" @click="store.loopAdd(store.activeLoop?.name ?? '')">Pin</button>
+        <button class="hover:text-fg" title="Clear the range (Esc)" aria-label="Clear range" @click="store.setRange(null)">✕</button>
+      </template>
       <span class="flex-1" />
       <span>Zoom</span>
       <input type="range" min="1" max="20" step="0.25" v-model.number="zoom" class="w-32" />
       <button class="hover:text-fg" @click="zoom = 1">Fit</button>
     </div>
 
-    <div class="flex shrink-0 border-b border-line" data-testid="timeline-tracks" :style="{ height: tracksHeight + 'px' }">
+    <div class="flex flex-1 min-h-0 overflow-y-auto border-b border-line" data-testid="timeline-tracks">
+     <div class="flex shrink-0 w-full" :style="{ height: tracksHeight + 'px' }">
       <!-- label gutter, mirrors the row heights -->
       <div class="w-24 shrink-0 border-r border-line text-[10px] text-muted select-none">
         <div class="flex items-end justify-end px-1" :style="{ height: ROW.ruler + ROW.gap + 'px' }">
           <button data-testid="add-track" class="hover:text-fg" title="Add a video or audio track" aria-haspopup="menu" :aria-expanded="!!addMenu" @click="toggleAddMenu">+ Track</button>
         </div>
-        <div class="px-2 flex items-center gap-1" data-testid="text-gutter" :style="{ height: ROW.text + 'px', marginBottom: ROW.gap + 'px' }">
-          <span class="flex-1 truncate">T1 · text</span>
-          <button data-testid="add-text" class="hover:text-fg" title="Add a title at the playhead" @click="store.textAdd(store.playhead)">+ Text</button>
+        <div
+          v-for="{ layer } in [...displayTextLayers].reverse()" :key="'t' + layer" class="px-2 flex items-center gap-1" data-testid="text-gutter"
+          :style="{ height: ROW.text + 'px', marginBottom: ROW.gap + 'px' }"
+        >
+          <span class="flex-1 truncate">T{{ layer + 1 }} · text</span>
+          <button data-testid="add-text" class="hover:text-fg" :title="`Add a title at the playhead on T${layer + 1}`" @click="store.textAdd(store.playhead, 'Title', layer)">+ Text</button>
+          <button v-if="store.textLayers > 1" class="w-4 text-center hover:text-danger" :title="`Remove text row T${layer + 1}`" @click="store.textLayerRemove(layer)">✕</button>
         </div>
         <div
           v-for="{ layer } in [...displayLayers].reverse()" :key="layer" class="px-2 flex flex-col justify-center gap-1" :style="{ height: ROW.overlay + 'px', marginBottom: ROW.gap + 'px' }"
@@ -446,24 +522,31 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
       >
         <div class="relative h-full" :style="{ width: contentW + 'px' }">
           <!-- ruler -->
-          <div class="absolute inset-x-0 top-0 border-b border-line cursor-text" :style="{ height: ROW.ruler + 'px' }" @pointerdown="startScrub">
+          <div class="absolute inset-x-0 top-0 border-b border-line cursor-text" :style="{ height: ROW.ruler + 'px' }" @pointerdown="startRuler">
             <div v-for="k in ticks" :key="k.t" class="absolute top-0 h-full border-l border-line/80 text-[10px] text-muted pl-1 pt-1" :style="{ left: k.x + PAD + 'px' }">{{ fmtMs(k.t, false) }}</div>
+            <!-- range: a solid strip on the ruler with a handle at each end -->
+            <template v-if="rangeBox">
+              <div class="absolute bottom-0 h-1.5 bg-yellow-400 pointer-events-none" :style="{ left: rangeBox.left + 'px', width: rangeBox.width + 'px' }" />
+              <div data-testid="range-handle-start" class="absolute top-0 h-full w-2 -ml-1 cursor-ew-resize" :style="{ left: rangeBox.left + 'px' }" @pointerdown.stop="startRangeHandle($event, 'rangeStart')" />
+              <div data-testid="range-handle-end" class="absolute top-0 h-full w-2 -ml-1 cursor-ew-resize" :style="{ left: rangeBox.left + rangeBox.width + 'px' }" @pointerdown.stop="startRangeHandle($event, 'rangeEnd')" />
+            </template>
           </div>
 
-          <!-- text track: titles burned in above everything -->
+          <!-- text rows: titles burned in above everything, highest row on top -->
           <div
-            class="absolute inset-x-0 rounded-sm" data-row="text" :class="rowClass(dropHint ? false : undefined)"
-            :style="{ top: textTop + 'px', height: ROW.text + 'px', paddingLeft: PAD + 'px' }"
-            @pointerdown="startScrub" @pooldrop="onPoolDrop('text', $event as CustomEvent)"
+            v-for="{ layer, clips } in displayTextLayers" :key="'text' + layer"
+            class="absolute inset-x-0 rounded-sm" :data-row="'text:' + layer" :class="rowClass(dropHint ? false : undefined)"
+            :style="{ top: textTop + (store.textLayers - 1 - layer) * (ROW.text + ROW.gap) + 'px', height: ROW.text + 'px', paddingLeft: PAD + 'px' }"
+            @pointerdown="startScrub" @pooldrop="onPoolDrop('text:' + layer, $event as CustomEvent)"
           >
             <div class="relative h-full">
               <TextBlock
-                v-for="t in displayTexts" :key="t.id" :clip="t" :px-per-ms="pxPerMs" :selected="isSelected('text', t.id)" :dimmed="t.timeline_start >= store.duration"
+                v-for="t in clips" :key="t.id" :clip="t" :px-per-ms="pxPerMs" :selected="isSelected('text', t.id)" :dimmed="t.timeline_start >= store.duration"
                 @select="store.select({ kind: 'text', id: t.id }, $event)"
                 @trim-start="startTextTrim(t, $event, 'textTrimStart')" @trim-end="startTextTrim(t, $event, 'textTrimEnd')"
                 @drag-start="startTextMove(t, $event)" @context-menu="openMenu({ kind: 'text', clip: t }, $event)"
               />
-              <div v-if="!displayTexts.length" class="text-[11px] text-muted/60 pt-2 pl-1 pointer-events-none">+ Text adds a title at the playhead · any font, colour and backdrop in the Inspector</div>
+              <div v-if="!clips.length && layer === 0" class="text-[11px] text-muted/60 pt-2 pl-1 pointer-events-none">+ Text adds a title at the playhead · any font, colour and backdrop in the Inspector</div>
             </div>
           </div>
 
@@ -545,10 +628,16 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
             No audio tracks · click “+ Track”, then drop audio from the pool
           </div>
 
-          <!-- highlights suggested by AI mode -->
+          <!-- highlights suggested by AI mode (shown while the AI panel is open) -->
           <div
-            v-for="h in store.highlights" :key="h.id" data-testid="highlight-band" class="absolute bottom-0 bg-accent/10 border-x border-accent/50 pointer-events-none z-10"
+            v-for="h in store.aiOpen ? store.highlights : []" :key="h.id" data-testid="highlight-band" class="absolute bottom-0 bg-accent/10 border-x border-accent/50 pointer-events-none z-10"
             :style="{ top: ROW.ruler + 'px', left: h.start * pxPerMs + PAD + 'px', width: (h.end - h.start) * pxPerMs + 'px' }"
+          />
+
+          <!-- selected range / active loop -->
+          <div
+            v-if="rangeBox" data-testid="range" class="absolute top-0 bottom-0 bg-yellow-400/20 border-x border-yellow-400 pointer-events-none z-[15]"
+            :style="{ left: rangeBox.left + 'px', width: rangeBox.width + 'px' }"
           />
 
           <!-- playhead -->
@@ -557,9 +646,8 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
           </div>
         </div>
       </div>
+     </div>
     </div>
-
-    <MediaPool class="flex-1 min-h-0" />
 
     <!-- right-click menu -->
     <div
@@ -601,7 +689,7 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
       <button
         v-for="t in TRACK_TYPES" :key="t.label" role="menuitem" class="w-full text-left px-3 py-1.5 hover:bg-accent hover:text-black"
         :title="t.hint" @click="addTrack(t.label)"
-      >{{ t.label === 'Video' ? '▶' : '♪' }} {{ t.label }} track</button>
+      >{{ t.label === 'Video' ? '▶' : t.label === 'Text' ? 'T' : '♪' }} {{ t.label }} track</button>
     </div>
   </div>
 </template>

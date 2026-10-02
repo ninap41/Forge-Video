@@ -14,15 +14,15 @@ import ExportDialog from "./components/ExportDialog.vue";
 import HelpDialog from "./components/HelpDialog.vue";
 import WelcomeDialog, { welcomeSeen } from "./components/WelcomeDialog.vue";
 import Banner from "./components/Banner.vue";
+import MediaPool from "./components/MediaPool.vue";
+import LoopsDrawer from "./components/LoopsDrawer.vue";
 import { MEDIA_EXT, VIDEO_EXT, isMediaPath } from "./utils/media";
 import { basename } from "./utils/time";
 
 const store = useProjectStore();
-const exportOpen = ref(false);
 const helpOpen = ref(false);
 /** First launch: set up the AI tools and the Claude account; dismissed once, remembered in localStorage. */
 const welcomeOpen = ref(!welcomeSeen());
-const aiOpen = ref(false);
 const ffmpegMissing = ref(false);
 
 /** ⌘I: video lands on V1 and in the pool; audio and images go to the pool. */
@@ -43,20 +43,30 @@ function onResize(e: PointerEvent) {
   store.timelineHeight = Math.round(Math.min(Math.max(200, resizeStart.h - (e.clientY - resizeStart.y)), window.innerHeight * 0.7));
 }
 function endResize() { resizeStart = null; }
+/** The two library splitters: column width (drag the edge next to the video) and the loops drawer's height. */
+let splitStart: { kind: "width" | "loops"; at: number; v: number } | null = null;
+function startSplit(kind: "width" | "loops", e: PointerEvent) {
+  splitStart = { kind, at: kind === "width" ? e.clientX : e.clientY, v: kind === "width" ? store.libraryWidth : store.loopsHeight };
+  (e.target as HTMLElement).setPointerCapture(e.pointerId);
+}
+function onSplit(e: PointerEvent) {
+  const s = splitStart; if (!s) return;
+  if (s.kind === "width") store.libraryWidth = Math.round(Math.min(Math.max(200, s.v + (e.clientX - s.at)), window.innerWidth * 0.5));
+  else store.loopsHeight = Math.round(Math.min(Math.max(60, s.v + (e.clientY - s.at)), window.innerHeight * 0.6));
+}
+function endSplit() { splitStart = null; }
+/** The folder of the last saved / opened project, so the dialogs start where the user works. */
+const lastFolder = () => { const p = store.lastProjectPath; return p && p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : undefined; };
 async function openProject() {
   if (store.dirty && !(await ask("Discard unsaved changes?", { title: "ForgeVideo", kind: "warning" }))) return;
-  const p = await open({ multiple: false, filters: [{ name: "ForgeVideo project", extensions: ["forgevideo", "json"] }] });
+  const p = await open({ multiple: false, defaultPath: lastFolder(), filters: [{ name: "ForgeVideo project", extensions: ["forgevideo", "json"] }] });
   if (typeof p === "string") await store.open(p);
-}
-/** A short created by AI mode: same unsaved-changes question as Open. */
-async function openShort(path: string) {
-  if (store.dirty && !(await ask("Discard unsaved changes?", { title: "ForgeVideo", kind: "warning" }))) return;
-  await store.open(path);
 }
 async function saveProject(as = false) {
   let path: string | undefined;
   if (as || !(await api.projectSave().catch(() => null))) {
-    const p = await save({ defaultPath: `${store.project?.name ?? "Untitled"}.forgevideo`, filters: [{ name: "ForgeVideo project", extensions: ["forgevideo"] }] });
+    const dir = lastFolder();
+    const p = await save({ defaultPath: `${dir ? dir + "/" : ""}${store.project?.name ?? "Untitled"}.forgevideo`, filters: [{ name: "ForgeVideo project", extensions: ["forgevideo"] }] });
     if (!p) return;
     path = p;
   }
@@ -71,10 +81,10 @@ function onKey(e: KeyboardEvent) {
   const tag = (e.target as HTMLElement).tagName;
   if (tag === "INPUT" || tag === "TEXTAREA") return;
   const meta = e.metaKey || e.ctrlKey;
-  if (e.key === "Escape") { helpOpen.value = false; return; }
+  if (e.key === "Escape") { if (helpOpen.value) helpOpen.value = false; else if (!store.exportOpen) store.setRange(null); return; }
   if (e.key === "?" && !meta) { e.preventDefault(); helpOpen.value = !helpOpen.value; return; }
   if (helpOpen.value || welcomeOpen.value) return;
-  if (e.code === "Space") { e.preventDefault(); if (store.clips.length) store.playing = !store.playing; }
+  if (e.code === "Space") { e.preventDefault(); if (store.clips.length) store.togglePlay(); }
   else if (meta && e.key === "t") { e.preventDefault(); void store.splitAtPlayhead(); }
   else if (meta && e.key === "j") { e.preventDefault(); void store.mergeSelected(); }
   else if ((e.key === "Backspace" || e.key === "Delete") && store.selected) { e.preventDefault(); void store.deleteSelected(); }
@@ -82,10 +92,11 @@ function onKey(e: KeyboardEvent) {
   else if (e.key === "ArrowRight") { store.playing = false; store.seek(store.playhead + (e.shiftKey ? 1000 : 33)); }
   else if (e.key === "Home") { store.playing = false; store.seek(0); }
   else if (e.key === "End") { store.playing = false; store.seek(store.duration); }
+  else if (e.key === "l" && !meta) { if (store.range) store.loopOn = !store.loopOn; }
   else if (meta && e.key === "s") { e.preventDefault(); void saveProject(e.shiftKey); }
   else if (meta && e.key === "o") { e.preventDefault(); void openProject(); }
   else if (meta && e.key === "i") { e.preventDefault(); void importDialog(); }
-  else if (meta && e.key === "e") { e.preventDefault(); exportOpen.value = true; }
+  else if (meta && e.key === "e") { e.preventDefault(); store.exportOpen = true; }
 }
 
 let unlistenDrop: (() => void) | undefined;
@@ -129,18 +140,31 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); unlistenDr
       <span class="flex-1" />
       <span v-if="store.error" class="text-danger truncate max-w-md mr-3" :title="store.error">{{ store.error }}</span>
       <span v-if="ffmpegMissing" class="text-danger mr-3">ffmpeg not found — brew install ffmpeg</span>
-      <button class="px-2 py-1 rounded hover:bg-panel-2" :disabled="!store.clips.length" @click="store.playing = !store.playing">{{ store.playing ? '⏸ Pause' : '▶ Play' }}</button>
+      <button class="px-2 py-1 rounded hover:bg-panel-2" :disabled="!store.clips.length" @click="store.togglePlay()">{{ store.playing ? '⏸ Pause' : '▶ Play' }}</button>
       <button
-        class="ml-1 px-2 py-1 rounded border" :class="aiOpen ? 'border-accent text-accent bg-accent/10' : 'border-line hover:bg-panel-2'"
-        title="Captions and highlights for shorts" :aria-pressed="aiOpen" data-testid="ai-toggle" @click="aiOpen = !aiOpen"
+        class="ml-1 px-2 py-1 rounded border" :class="store.aiOpen ? 'border-accent text-accent bg-accent/10' : 'border-line hover:bg-panel-2'"
+        title="Captions and highlights for shorts" :aria-pressed="store.aiOpen" data-testid="ai-toggle" @click="store.aiOpen = !store.aiOpen"
       >✦ AI</button>
-      <button class="ml-1 px-3 py-1.5 rounded bg-accent text-black font-medium disabled:opacity-40" :disabled="!store.clips.length" @click="exportOpen = true">Export…</button>
+      <button class="ml-1 px-3 py-1.5 rounded bg-accent text-black font-medium disabled:opacity-40" :disabled="!store.clips.length" @click="store.exportOpen = true">Export…</button>
       <button class="ml-1 w-7 h-7 rounded-full border border-line hover:bg-panel-2 font-semibold" title="Keyboard shortcuts (?)" aria-label="Help: keyboard shortcuts" @click="helpOpen = true">?</button>
     </header>
 
     <div class="flex-1 min-h-0 flex">
+      <!-- library column: pinned loops above the media pool, left of the video -->
+      <aside class="shrink-0 flex flex-col min-h-0 bg-panel" data-testid="library" :style="{ width: store.libraryWidth + 'px' }">
+        <LoopsDrawer class="shrink-0" :style="{ height: store.loopsOpen ? store.loopsHeight + 'px' : 'auto' }" />
+        <div
+          v-if="store.loopsOpen" class="h-1 shrink-0 cursor-row-resize bg-line hover:bg-accent/60" title="Drag to resize Pinned loops" data-testid="loops-resize"
+          @pointerdown="startSplit('loops', $event)" @pointermove="onSplit" @pointerup="endSplit" @pointercancel="endSplit"
+        />
+        <MediaPool class="flex-1 min-h-0" />
+      </aside>
+      <div
+        class="w-1 shrink-0 cursor-col-resize bg-line hover:bg-accent/60" title="Drag to resize the library" data-testid="library-resize"
+        @pointerdown="startSplit('width', $event)" @pointermove="onSplit" @pointerup="endSplit" @pointercancel="endSplit"
+      />
       <Preview />
-      <AiPanel v-if="aiOpen" @open-project="openShort" />
+      <AiPanel v-if="store.aiOpen" />
       <Inspector v-else />
     </div>
 
@@ -152,7 +176,7 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKey); unlistenDr
       <Timeline />
     </div>
 
-    <ExportDialog :open="exportOpen" @close="exportOpen = false" />
+    <ExportDialog :open="store.exportOpen" @close="store.exportOpen = false" />
     <HelpDialog :open="helpOpen" @close="helpOpen = false" />
     <WelcomeDialog :open="welcomeOpen" @close="welcomeOpen = false" />
     <Banner />

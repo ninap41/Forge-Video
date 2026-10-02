@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Imported media that may or may not be on the timeline. Tabs by kind, grid or list, drag onto a track.
+// Imported media that may or may not be on the timeline. Filter by kind, grid or list, drag onto a track.
 import { computed, onBeforeUnmount, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
@@ -74,14 +74,15 @@ onBeforeUnmount(() => window.removeEventListener("pointermove", onPointerMove));
 
 <template>
   <div class="flex flex-col min-h-0 text-xs">
-    <div class="flex items-center gap-1 px-2 h-7 shrink-0 border-b border-line">
-      <span class="uppercase tracking-wide text-[10px] text-muted mr-2">Media pool</span>
-      <button
-        v-for="t in TABS" :key="t.id" class="px-2 py-0.5 rounded" :class="tab === t.id ? 'bg-panel-2 text-fg' : 'text-muted hover:text-fg'"
-        @click="tab = t.id"
-      >{{ t.label }} <span class="opacity-60">{{ count(t.id) }}</span></button>
-      <span class="flex-1" />
-      <button class="px-2 py-0.5 rounded border border-line hover:border-muted" @click="importFiles">Import…</button>
+    <div class="flex items-center gap-1.5 px-2 h-8 shrink-0 border-b border-line">
+      <span class="uppercase tracking-wide text-[10px] text-muted whitespace-nowrap">Media pool</span>
+      <select
+        v-model="tab" data-testid="pool-filter" aria-label="Show" title="Which kinds of media to show"
+        class="min-w-0 flex-1 bg-panel-2 border border-line rounded px-1.5 py-0.5 text-fg"
+      >
+        <option v-for="t in TABS" :key="t.id" :value="t.id">{{ t.label }} ({{ count(t.id) }})</option>
+      </select>
+      <button class="px-2 py-0.5 rounded border border-line hover:border-muted whitespace-nowrap" @click="importFiles">Import…</button>
       <button class="w-6 text-center" :class="store.poolView === 'grid' ? 'text-fg' : 'text-muted hover:text-fg'" title="Thumbnails" aria-label="Thumbnail view" @click="store.poolView = 'grid'">▦</button>
       <button class="w-6 text-center" :class="store.poolView === 'list' ? 'text-fg' : 'text-muted hover:text-fg'" title="List" aria-label="List view" @click="store.poolView = 'list'">☰</button>
     </div>

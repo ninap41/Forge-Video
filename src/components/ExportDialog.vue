@@ -13,6 +13,10 @@ const store = useProjectStore();
 
 const quality = ref<Quality>("Standard");
 const audioOnly = ref(false);
+/** Render only the selected range (preselected whenever one is selected when the dialog opens). */
+const rangeOn = ref(false);
+watch(() => props.open, (o) => { if (o) rangeOn.value = !!store.range; });
+const rangeName = computed(() => store.activeLoop?.name ?? (store.range ? `${fmtMs(store.range.start, false)}–${fmtMs(store.range.end, false)}` : ""));
 const destination = ref<string>("");
 const plan = ref<ExportPlan | null>(null);
 const planError = ref<string | null>(null);
@@ -23,7 +27,10 @@ const error = ref<string | null>(null);
 const startedAt = ref(0);
 const elapsed = ref(0);
 
-const settings = computed(() => ({ destination: destination.value || "/tmp/forge-video-preview.mp4", quality: quality.value, audio_only: audioOnly.value }));
+const settings = computed(() => ({
+  destination: destination.value || "/tmp/forge-video-preview.mp4", quality: quality.value, audio_only: audioOnly.value,
+  range: rangeOn.value && store.range ? { ...store.range } : null,
+}));
 
 async function refreshPlan() {
   planError.value = null;
@@ -34,7 +41,8 @@ watch(audioOnly, () => { destination.value = ""; });
 
 async function pickDestination() {
   const ext = audioOnly.value ? "m4a" : "mp4";
-  const p = await save({ defaultPath: `${store.project?.name ?? "export"}.${ext}`, filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
+  const suffix = rangeOn.value && store.range ? ` - ${rangeName.value}` : "";
+  const p = await save({ defaultPath: `${store.project?.name ?? "export"}${suffix}.${ext}`, filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
   if (p) destination.value = p;
 }
 
@@ -80,6 +88,10 @@ const strategyLabel = computed(() => {
           <button v-for="q in (['Draft', 'Standard', 'High'] as const)" :key="q" class="flex-1 rounded border px-2 py-1.5" :class="quality === q ? 'border-accent bg-accent/10' : 'border-line'" :disabled="!!jobId || audioOnly" @click="quality = q">{{ q }}</button>
         </div>
         <label class="flex items-center gap-2 mb-3 cursor-pointer"><input type="checkbox" v-model="audioOnly" :disabled="!!jobId" /> Audio only (podcast .m4a)</label>
+        <div v-if="store.range" class="flex gap-1 mb-3" data-testid="export-range">
+          <button class="flex-1 rounded border px-2 py-1.5" :class="!rangeOn ? 'border-accent bg-accent/10' : 'border-line'" :disabled="!!jobId" @click="rangeOn = false">Whole timeline</button>
+          <button class="flex-1 rounded border px-2 py-1.5 truncate" :class="rangeOn ? 'border-yellow-400 bg-yellow-400/10' : 'border-line'" :disabled="!!jobId" :title="rangeName" @click="rangeOn = true">Range · {{ rangeName }}</button>
+        </div>
 
         <div class="flex items-center gap-2 mb-3">
           <span class="text-muted w-16">Save to</span>

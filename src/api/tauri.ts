@@ -56,8 +56,10 @@ export const api = {
   overlayLayerSetAudio: (layer: number, muted: boolean, volume: number) => invoke<Project>("overlay_layer_set_audio", { layer, muted, volume }),
   overlaySetPlacement: (id: string, placement: Placement) => invoke<Project>("overlay_set_placement", { id, placement }),
 
-  textAdd: (text: string, at: Ms) => invoke<Project>("text_add", { text, at: ms(at) }),
-  textMove: (id: string, at: Ms) => invoke<Project>("text_move", { id, at: ms(at) }),
+  textAdd: (text: string, at: Ms, layer: number) => invoke<Project>("text_add", { text, at: ms(at), layer }),
+  textMove: (id: string, at: Ms, layer: number) => invoke<Project>("text_move", { id, at: ms(at), layer }),
+  textLayerAdd: () => invoke<Project>("text_layer_add"),
+  textLayerRemove: (layer: number) => invoke<Project>("text_layer_remove", { layer }),
   textTrim: (id: string, duration: Ms) => invoke<Project>("text_trim", { id, duration: ms(duration) }),
   textSplit: (id: string, at: Ms) => invoke<SplitResult>("text_split", { id, at: ms(at) }),
   textDelete: (id: string) => invoke<Project>("text_delete", { id }),
@@ -66,6 +68,9 @@ export const api = {
   textSetStyle: (id: string, style: TextStyle) => invoke<Project>("text_set_style", { id, style }),
   /** Every installed font family (bundled ones first); falls back to a short macOS list. */
   systemFonts: () => invoke<string[]>("system_fonts"),
+
+  loopAdd: (name: string, start: Ms, end: Ms) => invoke<Project>("loop_add", { name, start: ms(start), end: ms(end) }),
+  loopRemove: (id: string) => invoke<Project>("loop_remove", { id }),
 
   audioTrackAdd: (label: string) => invoke<Project>("audio_track_add", { label }),
   audioTrackUpdate: (id: string, label: string, muted: boolean, volume: number) => invoke<Project>("audio_track_update", { id, label, muted, volume }),

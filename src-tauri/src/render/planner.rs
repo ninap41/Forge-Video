@@ -1,6 +1,7 @@
 //! Decides how to export: copy compressed packets (instant) or build a filter graph and encode.
 
-use crate::project::{AspectPreset, Project};
+use crate::project::{AspectPreset, Ms, Project, Range};
+use crate::timeline::MIN_CLIP_MS;
 use crate::render::ffmpeg::ms_to_secs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -31,6 +32,20 @@ pub struct ExportSettings {
     pub quality: Quality,
     /// Audio-only export (m4a). Skips video entirely.
     pub audio_only: bool,
+    /// Render only this span of the timeline (a pinned loop or the current selection).
+    #[serde(default)]
+    pub range: Option<Range>,
+}
+
+/// The timeline span an export covers: everything, or the requested range clamped to V1.
+pub(crate) fn export_span(p: &Project, s: &ExportSettings) -> crate::error::Result<(Ms, Ms)> {
+    let total = p.duration_ms();
+    let Some(r) = s.range else { return Ok((0, total)) };
+    let (start, end) = (r.start.min(total), r.end.min(total));
+    if start + MIN_CLIP_MS > end {
+        return Err(crate::error::Error::Export("range is outside the timeline".into()));
+    }
+    Ok((start, end))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,8 +77,9 @@ fn source_matches_preset(p: &Project, preset: AspectPreset) -> bool {
     ((w as f64 / h as f64) - (pw as f64 / ph as f64)).abs() < 0.01
 }
 
-pub fn stream_copy_blockers(p: &Project) -> Vec<String> {
+pub fn stream_copy_blockers(p: &Project, s: &ExportSettings) -> Vec<String> {
     let mut r = Vec::new();
+    if s.range.is_some() { r.push("range".into()); }
     if p.clips.len() != 1 {
         r.push(format!("{} clips on the timeline", p.clips.len()));
         return r;
@@ -96,7 +112,8 @@ pub fn plan_with_texts(p: &Project, s: &ExportSettings, texts: &[crate::render::
     if p.clips.is_empty() {
         return Err(crate::error::Error::Export("timeline is empty".into()));
     }
-    let duration_ms = p.duration_ms();
+    let (span_start, span_end) = export_span(p, s)?;
+    let duration_ms = span_end - span_start;
     if s.audio_only {
         return Ok(ExportPlan {
             strategy: Strategy::AudioOnly,
@@ -107,7 +124,7 @@ pub fn plan_with_texts(p: &Project, s: &ExportSettings, texts: &[crate::render::
             args: crate::render::graph::build_args_with_texts(p, s, texts),
         });
     }
-    let reasons = stream_copy_blockers(p);
+    let reasons = stream_copy_blockers(p, s);
     if reasons.is_empty() {
         let c = &p.clips[0];
         // Only the first audio stream was checked, so only it is copied. HEVC needs the hvc1 tag for QuickTime.
@@ -155,7 +172,7 @@ mod tests {
         }
     }
     fn settings() -> ExportSettings {
-        ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false }
+        ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false, range: None }
     }
 
     #[test]
@@ -220,7 +237,7 @@ mod more_tests {
         p
     }
     fn settings() -> ExportSettings {
-        ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false }
+        ExportSettings { destination: PathBuf::from("/tmp/out.mp4"), quality: Quality::Standard, audio_only: false, range: None }
     }
 
     #[test]
@@ -251,60 +268,60 @@ mod more_tests {
     #[test]
     fn each_blocker_is_reported_individually() {
         let p = one(media(1920, 1080));
-        assert!(stream_copy_blockers(&p).is_empty());
+        assert!(stream_copy_blockers(&p, &settings()).is_empty());
 
         let mut p2 = p.clone();
         let t = timeline::audio_track_add(&mut p2, "Music");
         let mut am = media(0, 0);
         am.duration_ms = 1000;
         timeline::audio_clip_add(&mut p2, t, AudioClip::new(PathBuf::from("/m.m4a"), am), 0).unwrap();
-        assert_eq!(stream_copy_blockers(&p2), vec!["audio tracks"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["audio tracks"]);
         let mut p2 = p.clone();
         timeline::audio_track_add(&mut p2, "Empty");
-        assert!(stream_copy_blockers(&p2).is_empty(), "an empty track is not a blocker");
+        assert!(stream_copy_blockers(&p2, &settings()).is_empty(), "an empty track is not a blocker");
 
         let mut p2 = p.clone();
         timeline::overlay_add(&mut p2, OverlayClip::new(PathBuf::from("/o.mp4"), media(1280, 720)), 0, 0);
-        assert_eq!(stream_copy_blockers(&p2), vec!["overlay track"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["overlay track"]);
 
         let mut p2 = p.clone();
-        let tid = timeline::text_add(&mut p2, TextClip::new("Hi"), 0);
-        assert_eq!(stream_copy_blockers(&p2), vec!["text track"]);
-        timeline::text_move(&mut p2, tid, 60_000).unwrap();
-        assert!(stream_copy_blockers(&p2).is_empty(), "a title after V1 ends is not a blocker");
+        let tid = timeline::text_add(&mut p2, TextClip::new("Hi"), 0, 0);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["text track"]);
+        timeline::text_move(&mut p2, tid, 60_000, 0).unwrap();
+        assert!(stream_copy_blockers(&p2, &settings()).is_empty(), "a title after V1 ends is not a blocker");
 
         let mut p2 = p.clone();
         p2.crop = Crop { scale: 1.5, x: 0.5, y: 0.5 };
-        assert_eq!(stream_copy_blockers(&p2), vec!["crop / reposition"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["crop / reposition"]);
 
         let mut p2 = p.clone();
         p2.aspect = AspectPreset::Square1x1;
-        assert_eq!(stream_copy_blockers(&p2), vec!["aspect ratio change"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["aspect ratio change"]);
 
         let mut p2 = p.clone();
         p2.clips[0].media.codec = "prores".into();
-        assert_eq!(stream_copy_blockers(&p2), vec!["source codec prores"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["source codec prores"]);
 
         let mut p2 = p.clone();
         p2.clips[0].volume = 0.5;
-        assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["volume change"]);
         let mut p2 = p.clone();
         p2.clips[0].muted = true;
-        assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["volume change"]);
         let mut p2 = p.clone();
         p2.video_muted = true;
-        assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["volume change"]);
         let mut p2 = p.clone();
         p2.video_volume = 0.7;
-        assert_eq!(stream_copy_blockers(&p2), vec!["volume change"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["volume change"]);
 
         let mut p2 = p.clone();
         p2.clips[0].media.audio_codec = Some("pcm_s16le".into());
-        assert_eq!(stream_copy_blockers(&p2), vec!["audio codec"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["audio codec"]);
 
         let mut p2 = p.clone();
         p2.clips[0].fade_out = 200;
-        assert_eq!(stream_copy_blockers(&p2), vec!["fades"]);
+        assert_eq!(stream_copy_blockers(&p2, &settings()), vec!["fades"]);
     }
 
     #[test]
@@ -312,7 +329,7 @@ mod more_tests {
         let mut m = media(1920, 1080);
         m.is_still = true; m.codec = "png".into(); m.has_audio = false; m.audio_codec = None;
         let p = one(m);
-        assert_eq!(stream_copy_blockers(&p), vec!["source codec png"]);
+        assert_eq!(stream_copy_blockers(&p, &settings()), vec!["source codec png"]);
         assert_eq!(plan(&p, &settings()).unwrap().strategy, Strategy::HardwareEncode);
     }
 
@@ -322,7 +339,7 @@ mod more_tests {
         m.has_audio = false;
         m.audio_codec = None;
         let p = one(m);
-        assert!(stream_copy_blockers(&p).is_empty());
+        assert!(stream_copy_blockers(&p, &settings()).is_empty());
         assert_eq!(plan(&p, &settings()).unwrap().strategy, Strategy::StreamCopy);
     }
 
@@ -331,7 +348,7 @@ mod more_tests {
         let mut p = one(media(1920, 1080));
         timeline::append(&mut p, Clip::new(PathBuf::from("/b.mp4"), media(1920, 1080)));
         timeline::overlay_add(&mut p, OverlayClip::new(PathBuf::from("/o.mp4"), media(1280, 720)), 0, 0);
-        assert_eq!(stream_copy_blockers(&p), vec!["2 clips on the timeline"]);
+        assert_eq!(stream_copy_blockers(&p, &settings()), vec!["2 clips on the timeline"]);
     }
 
     #[test]
@@ -348,7 +365,7 @@ mod more_tests {
     #[test]
     fn zero_sized_source_can_never_stream_copy() {
         let p = one(media(0, 0));
-        assert!(stream_copy_blockers(&p).contains(&"aspect ratio change".to_string()));
+        assert!(stream_copy_blockers(&p, &settings()).contains(&"aspect ratio change".to_string()));
     }
 
     #[test]
@@ -413,5 +430,26 @@ mod more_tests {
         assert_eq!(s.quality, Quality::Draft);
         assert!(s.audio_only);
         assert_eq!(s.destination, PathBuf::from("/x.mp4"));
+        assert_eq!(s.range, None, "settings from before range exports still parse");
+        let s: ExportSettings = serde_json::from_str(r#"{"destination":"/x.mp4","quality":"Draft","audio_only":false,"range":{"start":1000,"end":3000}}"#).unwrap();
+        assert_eq!(s.range, Some(Range { start: 1000, end: 3000 }));
+    }
+
+    #[test]
+    fn range_export_encodes_only_the_span() {
+        let p = one(media(1920, 1080));
+        let mut s = settings();
+        s.range = Some(Range { start: 1000, end: 3000 });
+        let pl = plan(&p, &s).unwrap();
+        assert_eq!(pl.strategy, Strategy::HardwareEncode, "a range always re-encodes");
+        assert_eq!(pl.reasons, vec!["range"]);
+        assert_eq!(pl.duration_ms, 2000);
+        s.range = Some(Range { start: 4000, end: 99_000 });
+        assert_eq!(plan(&p, &s).unwrap().duration_ms, 1000, "clamped to V1");
+        s.range = Some(Range { start: 4950, end: 99_000 });
+        assert!(plan(&p, &s).is_err(), "too short once clamped");
+        s.range = Some(Range { start: 2000, end: 2500 });
+        s.audio_only = true;
+        assert_eq!(plan(&p, &s).unwrap().duration_ms, 500);
     }
 }

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { audioClip, audioTrack, baseProject, clip, fakeSplit, media, overlay, poolItem, project, stillMedia, textClip, type MockApi } from "../test/fixtures";
+import { audioClip, audioTrack, baseProject, clip, fakeSplit, media, overlay, poolItem, project, stillMedia, textClip, type MockApi, loopFx } from "../test/fixtures";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -478,7 +478,7 @@ describe("mutations", () => {
     const t1 = textClip({ id: "t1", timeline_start: 1000, duration: 2000, fade_in: 500 });
     api.textAdd.mockImplementationOnce(() => Promise.resolve({ ...p, texts: [t1] }));
     await s.textAdd(1000);
-    expect(api.textAdd).toHaveBeenCalledWith("Title", 1000);
+    expect(api.textAdd).toHaveBeenCalledWith("Title", 1000, 0);
     expect(s.selected).toEqual({ kind: "text", id: "t1" });
     expect(s.selectedText?.id).toBe("t1");
     expect(api.cacheThumbnails).toHaveBeenCalledTimes(1); // only the V1 clip: titles have no media
@@ -486,13 +486,16 @@ describe("mutations", () => {
     expect(s.currentTexts).toEqual([{ clip: t1, opacity: 0.5 }]);
     s.playhead = 3500;
     expect(s.currentTexts).toEqual([]);
-    for (const k of ["textMove", "textTrim", "textSetFades", "textSetPosition", "textSetStyle"] as const) api[k].mockImplementation(() => Promise.resolve({ ...p, texts: [t1] }));
-    await s.textMove("t1", 5);
+    for (const k of ["textMove", "textTrim", "textSetFades", "textSetPosition", "textSetStyle", "textLayerAdd", "textLayerRemove"] as const) api[k].mockImplementation(() => Promise.resolve({ ...p, texts: [t1] }));
+    await s.textMove("t1", 5, 1);
     await s.textTrim("t1", 3000);
     await s.textSetFades("t1", 1, 2);
     await s.textSetPosition("t1", 0.1, 0.2);
     await s.textSetStyle("t1", { ...t1.style, color: "#ff0000" });
-    expect(api.textMove).toHaveBeenCalledWith("t1", 5);
+    expect(api.textMove).toHaveBeenCalledWith("t1", 5, 1);
+    await s.textLayerAdd(); await s.textLayerRemove(1);
+    expect(api.textLayerAdd).toHaveBeenCalled();
+    expect(api.textLayerRemove).toHaveBeenCalledWith(1);
     expect(api.textTrim).toHaveBeenCalledWith("t1", 3000);
     expect(api.textSetFades).toHaveBeenCalledWith("t1", 1, 2);
     expect(api.textSetPosition).toHaveBeenCalledWith("t1", 0.1, 0.2);
@@ -513,6 +516,93 @@ describe("mutations", () => {
     s.project = { ...p, texts: [t1, textClip({ id: "late", timeline_start: 9000 })] };
     const r = s.textRasters(1080, 1920);
     expect(r).toEqual([{ id: "t1", png: "iVBORw0KGgo=" }]);
+  });
+
+  it("range selection: sorted, clamped, cleared; loops pin, select, play and export it", async () => {
+    const s = useProjectStore();
+    const p = project([clip({ id: "a" })]); // 5 s
+    api.projectGet.mockImplementationOnce(() => Promise.resolve(p));
+    await s.load();
+    expect(s.range).toBeNull();
+    s.setRange({ start: 4000, end: 1000 });
+    expect(s.range).toEqual({ start: 1000, end: 4000 });
+    s.setRange({ start: 3000, end: 99_000 });
+    expect(s.range).toEqual({ start: 3000, end: 5000 });
+    s.setRange({ start: 1000, end: 1050 });
+    expect(s.range).toBeNull();
+    // loop toggle follows the range
+    s.setRange({ start: 1000, end: 3000 });
+    s.loopOn = true;
+    expect(s.loopRange).toEqual({ start: 1000, end: 3000 });
+    s.setRange(null);
+    expect(s.loopOn).toBe(false);
+    expect(s.loopRange).toBeNull();
+    // playRange: seeks, loops, plays; pressed again, pauses
+    s.playRange({ start: 2000, end: 4000 });
+    expect([s.playhead, s.loopOn, s.playing, s.range]).toEqual([2000, true, true, { start: 2000, end: 4000 }]);
+    s.playRange({ start: 2000, end: 4000 });
+    expect(s.playing).toBe(false);
+    // pinning: Rust returns the project with the loop; it becomes the active one
+    const l = loopFx({ id: "l1", name: "Hook", start: 2000, end: 4000 });
+    api.loopAdd.mockImplementationOnce(() => Promise.resolve({ ...p, loops: [l] }));
+    await s.loopAdd("Hook");
+    expect(api.loopAdd).toHaveBeenCalledWith("Hook", 2000, 4000);
+    expect(s.activeLoopId).toBe("l1");
+    expect(s.activeLoop).toEqual(l);
+    s.setRange({ start: 0, end: 1000 });
+    expect(s.activeLoopId).toBeNull();
+    s.selectLoop("l1");
+    expect(s.range).toEqual({ start: 2000, end: 4000 });
+    expect(s.activeLoopId).toBe("l1");
+    expect(s.loopOn).toBe(true);
+    s.playhead = 3000;
+    s.togglePlay();
+    expect([s.playing, s.playhead]).toEqual([true, 2000]);
+    s.togglePlay();
+    expect(s.playing).toBe(false);
+    s.playing = true;
+    s.exportLoop("l1");
+    expect([s.exportOpen, s.playing, s.activeLoopId]).toEqual([true, false, "l1"]);
+    // a project without the loop clears the active id; a shorter project clamps the range
+    api.loopRemove.mockImplementationOnce(() => Promise.resolve({ ...p, clips: [clip({ id: "a", source_end: 3000 })], loops: [] }));
+    await s.loopRemove("l1");
+    expect(api.loopRemove).toHaveBeenCalledWith("l1");
+    expect(s.activeLoopId).toBeNull();
+    expect(s.range).toEqual({ start: 2000, end: 3000 });
+    // loopsOpen persists
+    s.loopsOpen = false;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(localStorage.getItem("forgevideo.loopsOpen")).toBe("0");
+  });
+
+  it("remembers the last project path: save and open store it, launch reopens it, New forgets it", async () => {
+    const s = useProjectStore();
+    expect(s.lastProjectPath).toBeNull();
+    api.projectSave.mockResolvedValueOnce("/work/reel.forgevideo");
+    await s.save("/work/reel.forgevideo");
+    expect(s.lastProjectPath).toBe("/work/reel.forgevideo");
+    expect(localStorage.getItem("forgevideo.lastProject")).toBe("/work/reel.forgevideo");
+    await s.open("/work/other.forgevideo");
+    expect(s.lastProjectPath).toBe("/work/other.forgevideo");
+    // a fresh store (new launch) reopens that file instead of asking Rust for the blank project
+    setActivePinia(createPinia());
+    const s2 = useProjectStore();
+    api.projectGet.mockClear(); api.projectOpen.mockClear();
+    await s2.load();
+    expect(api.projectOpen).toHaveBeenCalledWith("/work/other.forgevideo");
+    expect(api.projectGet).not.toHaveBeenCalled();
+    expect(s2.dirty).toBe(false);
+    // a file that no longer opens is forgotten and the blank project loads
+    api.projectOpen.mockRejectedValueOnce("no such file");
+    setActivePinia(createPinia());
+    const s3 = useProjectStore();
+    await s3.load();
+    expect(api.projectGet).toHaveBeenCalled();
+    expect(s3.lastProjectPath).toBeNull();
+    expect(localStorage.getItem("forgevideo.lastProject")).toBe("");
+    await s3.open("/work/reel.forgevideo");
+    await s3.newProject();
+    expect(s3.lastProjectPath).toBeNull();
   });
 
   it("poolView and timelineHeight persist to localStorage", async () => {

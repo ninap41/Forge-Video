@@ -9,7 +9,7 @@ Stack: Vue 3 + TypeScript + Pinia + Tailwind → Tauri 2 → Rust → `ffmpeg`/`
 
 ## Features
 
-**Media pool** — the section under the timeline. Every imported file lives here, in All / Clips /
+**Media pool** — the column to the left of the video, under Pinned loops. Every imported file lives here, in All / Clips /
 Audio / Images tabs, as thumbnails or a list (your choice is remembered). Add files with **Import…**,
 **⌘I**, the per-tab Import button, or by dropping them anywhere in the window; the same file is never
 pooled twice. Drag an item onto a track to place it at that time, or double-click to place it at the
@@ -31,13 +31,21 @@ a constant **Opacity** per clip, so a half-transparent video over V1 makes a com
 and fader for the whole row in the gutter, all mixed into the export. Projects saved before this
 load their overlays muted. **+ Track → Video track** in the gutter adds a row; ✕ removes one.
 
-**T1 · text track** — titles burned into the video, above every other layer. **+ Text** in the gutter
-drops a 5 s title at the playhead; drag it in time, trim its length from either edge, ⌘T splits it,
-⌫ deletes it. The Inspector's **Title** section takes multi-line text (Enter for a new line), **any font
+**Text rows T1, T2, …** — titles burned into the video, above every other layer (higher rows on top).
+**+ Track → Text track** adds a row, ✕ removes it. Each row's **+ Text** drops a 5 s title at the
+playhead; drag it in time or onto another row, trim its length from either edge, ⌘T splits it, ⌫ deletes it. The Inspector's **Title** section takes multi-line text (Enter for a new line), **any font
 installed on the Mac**, a size slider, a colour well that opens the macOS colour panel, and an optional
 **Backdrop**: a rounded rectangle behind the text in any colour and opacity. Drag the title in the
 preview to place it, scroll to resize. Text is drawn by the app itself (not ffmpeg), so the export shows
 exactly what the preview did. Captions from AI mode are separate and still go to an `.srt`.
+
+**Range selection & pinned loops** — drag on the ruler to select a span (yellow); drag either handle to
+resize it, click outside it or press Esc to clear it. **⟳ Loop** (or **L**) plays the span on repeat.
+**Pin** keeps it in the **Pinned loops** drawer above the media pool, left of the video, saved with the project: play a loop,
+click its name to show it, **Export** it on its own (the Export dialog preselects **Range**), or unpin it.
+AI highlight cards have the same ▶ and **Pin loop** buttons next to Export short. Pinning or picking a
+loop scrolls the timeline to it. The library column and the Pinned loops drawer both resize by dragging
+their edges.
 
 **Audio tracks** — as many as you like, each with a label (Music, SFX, Narration, Other, or your own
 text; click it to rename), a track mute and a track fader. Clips are free-positioned, can be dragged between tracks,
@@ -65,11 +73,13 @@ key. It needs the optional setup in step 7.
 2. **Find highlights** sends the transcript (text only) to the Claude Code CLI, which suggests up to
    ten sections that stand on their own. Each is marked on the timeline and listed with its edit
    plan: what to keep, what to cut, fades, and notes for things to do by hand.
-3. **Create short** builds that plan as a new 9:16 project file next to the saved project. The
-   recording's own project is never changed.
+3. **Export short** selects that section on the timeline and opens the Export dialog on it, so the
+   rendered file covers just the highlight. The plan's keep / cut steps are there to follow by hand.
 
-Only V1 is transcribed, and shorts do not carry over overlay or audio tracks. Highlights are not
-moved by later edits, so find them again after restructuring the timeline.
+Only V1 is transcribed. The green highlight bands show while the AI panel is open and hide when it is
+closed (the highlights are kept). Highlights are not moved by later edits, so find them again after
+restructuring the timeline. Captions can be corrected in the Inspector's Captions list (select the CC
+track) as well as by double-clicking them on the timeline.
 
 **Projects** are pretty JSON `.forgevideo` files with media paths stored relative to the project
 folder. Files saved before audio tracks existed load their music bed as one "Music" track.
@@ -256,20 +266,21 @@ Press **?** or click the **?** button at the right of the toolbar to see this li
 
 | Keys | Action |
 |---|---|
-| Space | Play / pause |
+| Space | Play / pause (a loaded loop restarts from its beginning) |
 | ⌘ T | Split selected clip at playhead |
 | ⌘ J | Join (merge) the selected clips (⇧-click to select several) |
 | ⌫ / Delete | Delete selected clip |
 | ← / → | Nudge playhead one frame |
 | ⇧ ← / ⇧ → | Nudge playhead one second |
 | Home / End | Jump to start / end |
+| L | Loop the selected range |
 | ⌘ I | Import media… |
 | ⌘ O | Open project… |
 | ⌘ S | Save project |
 | ⇧ ⌘ S | Save project as… |
 | ⌘ E | Export… |
 | ? | Show shortcuts |
-| Esc | Close dialog |
+| Esc | Close dialog / clear the range |
 
 The table is generated from `SHORTCUTS` in `src/components/HelpDialog.vue`; keep them in sync.
 
@@ -285,8 +296,10 @@ The table is generated from `SHORTCUTS` in `src/components/HelpDialog.vue`; keep
 | Drag overlay / audio clip | Move it in time, or to another layer / track |
 | Drag from media pool | Place on a track at that time |
 | Double-click pool item | Place it at the playhead |
-| Click ruler / drag | Scrub the playhead |
-| Drag preview | Reposition the crop, or place the selected overlay / title |
-| Scroll on preview | Zoom the crop, or resize the selected overlay / title |
+| Click ruler | Scrub the playhead (outside a range clears it) |
+| Drag on ruler | Select a range (yellow) · ⟳ loops it, Pin keeps it |
+| Drag range edge | Resize the range |
+| Drag preview | Reposition the picture, or place the selected overlay / title |
+| Scroll on preview | Zoom in or out (down to 0.25×), or resize the selected overlay / title |
 | Drop media files | Add to the media pool |
 | Drag timeline top edge | Resize the timeline panel |

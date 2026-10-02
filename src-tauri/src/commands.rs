@@ -101,7 +101,7 @@ pub fn project_set_video_volume(state: S, volume: f32) -> Project {
 
 #[tauri::command]
 pub fn project_set_crop(state: S, crop: Crop) -> Project {
-    state.project.lock().unwrap().crop = Crop { scale: crop.scale.clamp(1.0, 4.0), x: crop.x.clamp(0.0, 1.0), y: crop.y.clamp(0.0, 1.0) };
+    state.project.lock().unwrap().crop = Crop { scale: crop.scale.clamp(crate::project::CROP_SCALE_MIN, crate::project::CROP_SCALE_MAX), x: crop.x.clamp(0.0, 1.0), y: crop.y.clamp(0.0, 1.0) };
     snapshot(&state)
 }
 
@@ -262,17 +262,43 @@ pub fn overlay_set_placement(state: S, id: Uuid, placement: Placement) -> Result
     Ok(snapshot(&state))
 }
 
-// ---------- Text track (T1) ----------
+// ---------- Text rows (T1, T2, …) ----------
 
 #[tauri::command]
-pub fn text_add(state: S, text: String, at: Ms) -> Project {
-    timeline::text_add(&mut state.project.lock().unwrap(), TextClip::new(text), at);
+pub fn text_add(state: S, text: String, at: Ms, layer: u32) -> Project {
+    timeline::text_add(&mut state.project.lock().unwrap(), TextClip::new(text), at, layer);
     snapshot(&state)
 }
 
 #[tauri::command]
-pub fn text_move(state: S, id: Uuid, at: Ms) -> Result<Project> {
-    with_project(&state, |p| timeline::text_move(p, id, at))?;
+pub fn text_move(state: S, id: Uuid, at: Ms, layer: u32) -> Result<Project> {
+    with_project(&state, |p| timeline::text_move(p, id, at, layer))?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
+pub fn text_layer_add(state: S) -> Project {
+    timeline::text_layer_add(&mut state.project.lock().unwrap());
+    snapshot(&state)
+}
+
+#[tauri::command]
+pub fn text_layer_remove(state: S, layer: u32) -> Result<Project> {
+    with_project(&state, |p| timeline::text_layer_remove(p, layer))?;
+    Ok(snapshot(&state))
+}
+
+// ---------- Pinned loops ----------
+
+#[tauri::command]
+pub fn loop_add(state: S, name: String, start: Ms, end: Ms) -> Result<Project> {
+    with_project(&state, |p| timeline::loop_add(p, &name, start, end))?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
+pub fn loop_remove(state: S, id: Uuid) -> Result<Project> {
+    with_project(&state, |p| timeline::loop_remove(p, id))?;
     Ok(snapshot(&state))
 }
 
@@ -519,7 +545,7 @@ pub async fn export_start(app: AppHandle, state: S<'_>, settings: ExportSettings
         let (dir, rasters) = write_text_rasters(p, &texts, job_id)?;
         let plan = crate::render::plan_with_texts(p, &settings, &rasters);
         if plan.is_err() { if let Some(d) = &dir { let _ = std::fs::remove_dir_all(d); } }
-        Ok((plan?, export_cues(p), dir))
+        Ok((plan?, export_cues(p, settings.range), dir))
     });
     let (plan, cues, raster_dir) = match planned {
         Ok(v) => v,
@@ -575,8 +601,10 @@ pub fn ffmpeg_status() -> FfmpegStatus {
 
 /// Captions travel beside the export as `<name>.srt`. `None` when there are none or it cannot be written.
 /// What the `.srt` gets: the timeline cues, or nothing while the captions track is switched off.
-fn export_cues(p: &Project) -> Vec<crate::project::Cue> {
-    if p.captions_enabled { ai::captions::timeline_cues(p) } else { Vec::new() }
+fn export_cues(p: &Project, range: Option<crate::project::Range>) -> Vec<crate::project::Cue> {
+    if !p.captions_enabled { return Vec::new(); }
+    let cues = ai::captions::timeline_cues(p);
+    match range { Some(r) => ai::captions::crop_cues(cues, r), None => cues }
 }
 
 fn write_srt(destination: &Path, cues: &[crate::project::Cue]) -> Option<PathBuf> {
@@ -777,7 +805,8 @@ mod tests {
         let p = project_set_crop(st.clone(), Crop { scale: 9.0, x: -1.0, y: 2.0 });
         assert_eq!(p.crop, Crop { scale: 4.0, x: 0.0, y: 1.0 }, "crop is clamped");
         let p = project_set_crop(st.clone(), Crop { scale: 0.2, x: 0.3, y: 0.7 });
-        assert_eq!(p.crop, Crop { scale: 1.0, x: 0.3, y: 0.7 });
+        assert_eq!(p.crop, Crop { scale: 0.25, x: 0.3, y: 0.7 }, "zoom out stops at 0.25");
+        assert_eq!(project_set_crop(st.clone(), Crop { scale: 0.5, x: 0.3, y: 0.7 }).crop.scale, 0.5);
         assert!(project_set_video_muted(st.clone(), true).video_muted);
         assert!(project_get(st.clone()).video_muted, "video mute persisted");
         assert!(!project_set_video_muted(st.clone(), false).video_muted);
@@ -785,7 +814,7 @@ mod tests {
         assert_eq!(project_set_video_volume(st.clone(), 7.0).video_volume, 1.0, "fader clamps to 1");
         assert_eq!(project_set_video_volume(st.clone(), f32::NAN).video_volume, 1.0);
         assert_eq!(project_set_video_volume(st.clone(), 1.0).video_volume, 1.0);
-        assert_eq!(project_get(st).crop.scale, 1.0, "state persisted");
+        assert_eq!(project_get(st).crop.scale, 0.5, "state persisted");
     }
 
     #[tokio::test]
@@ -973,12 +1002,12 @@ mod tests {
     fn text_track_commands_and_raster_staging() {
         let app = app();
         let st = app.state::<AppState>();
-        let p = text_add(st.clone(), "Hello".into(), 1000);
+        let p = text_add(st.clone(), "Hello".into(), 1000, 0);
         assert_eq!(p.texts.len(), 1);
         let id = p.texts[0].id;
         assert_eq!((p.texts[0].timeline_start, p.texts[0].duration, p.texts[0].style.text.as_str()), (1000, 5000, "Hello"));
         assert_eq!(text_trim(st.clone(), id, 2000).unwrap().texts[0].duration, 2000);
-        assert_eq!(text_move(st.clone(), id, 500).unwrap().texts[0].timeline_start, 500);
+        assert_eq!(text_move(st.clone(), id, 500, 0).unwrap().texts[0].timeline_start, 500);
         let p = text_set_fades(st.clone(), id, 100, 200).unwrap();
         assert_eq!((p.texts[0].fade_in, p.texts[0].fade_out), (100, 200));
         let p = text_set_position(st.clone(), id, 0.2, 0.3).unwrap();
@@ -1005,8 +1034,29 @@ mod tests {
         assert_eq!(rasters.len(), 1);
         assert_eq!(std::fs::read(&rasters[0].1).unwrap(), png);
         std::fs::remove_dir_all(dir.unwrap()).unwrap();
-        timeline::text_move(&mut p, id, 10_000).unwrap();
+        timeline::text_move(&mut p, id, 10_000, 0).unwrap();
         assert_eq!(write_text_rasters(&p, &[], job).unwrap(), (None, Vec::new()), "no titles in V1: nothing staged");
+    }
+
+    #[tokio::test]
+    async fn text_rows_and_loop_commands() {
+        let app = app();
+        let st = app.state::<AppState>();
+        media_import(st.clone(), fx("clip_a_720p.mp4")).await.unwrap();
+        assert_eq!(text_layer_add(st.clone()).text_layers, 2);
+        let p = text_add(st.clone(), "Up".into(), 0, 1);
+        assert_eq!(p.texts[0].layer, 1);
+        let p = text_add(st.clone(), "Row 3".into(), 0, 2);
+        assert_eq!(p.text_layers, 3);
+        let p = text_layer_remove(st.clone(), 2).unwrap();
+        assert_eq!((p.text_layers, p.texts.len()), (2, 1));
+        assert!(text_layer_remove(st.clone(), 7).is_err());
+        let p = loop_add(st.clone(), "Hook".into(), 500, 2500).unwrap();
+        assert_eq!((p.loops.len(), p.loops[0].name.as_str()), (1, "Hook"));
+        assert!(loop_add(st.clone(), "".into(), 100, 150).is_err());
+        let p = loop_remove(st.clone(), p.loops[0].id).unwrap();
+        assert!(p.loops.is_empty());
+        assert!(loop_remove(st.clone(), Uuid::new_v4()).is_err());
     }
 
     #[tokio::test]
@@ -1081,7 +1131,7 @@ mod tests {
         let p = audio_track_remove(st.clone(), t).unwrap();
         assert_eq!(p.audio_tracks.len(), 1);
         // the export plan now needs a re-encode
-        let s = ExportSettings { destination: PathBuf::from("/tmp/x.mp4"), quality: crate::render::Quality::Standard, audio_only: false };
+        let s = ExportSettings { destination: PathBuf::from("/tmp/x.mp4"), quality: crate::render::Quality::Standard, audio_only: false, range: None };
         let plan = export_plan(st.clone(), s).unwrap();
         assert_eq!(plan.strategy, crate::render::Strategy::HardwareEncode);
         assert!(plan.reasons.contains(&"overlay track".to_string()));
@@ -1122,7 +1172,7 @@ mod tests {
     async fn export_plan_and_cache_commands() {
         let app = app();
         let st = app.state::<AppState>();
-        let s = ExportSettings { destination: PathBuf::from("/tmp/x.mp4"), quality: crate::render::Quality::Standard, audio_only: false };
+        let s = ExportSettings { destination: PathBuf::from("/tmp/x.mp4"), quality: crate::render::Quality::Standard, audio_only: false, range: None };
         assert!(export_plan(st.clone(), s.clone()).is_err(), "empty timeline");
         let p = media_import(st.clone(), fx("clip_a_720p.mp4")).await.unwrap();
         let id = p.clips[0].id;
@@ -1237,10 +1287,12 @@ mod tests {
         let dest = dir.path().join("out.mp4");
         assert_eq!(write_srt(&dest, &[]), None);
         with_captions(&st);
-        let cues = export_cues(&project_get(st.clone()));
+        let cues = export_cues(&project_get(st.clone()), None);
         assert_eq!(cues.len(), ai::captions::timeline_cues(&project_get(st.clone())).len());
+        let cropped = export_cues(&project_get(st.clone()), Some(crate::project::Range { start: 1000, end: 3000 }));
+        assert!(cropped.len() < cues.len() || cropped[0].start == 0, "a range export re-times its cues");
         assert!(!project_set_captions_enabled(st.clone(), false).captions_enabled);
-        assert!(export_cues(&project_get(st.clone())).is_empty(), "captions off: nothing reaches the .srt");
+        assert!(export_cues(&project_get(st.clone()), None).is_empty(), "captions off: nothing reaches the .srt");
         assert!(project_set_captions_enabled(st.clone(), true).captions_enabled);
         assert_eq!(write_srt(&dest, &cues), Some(dir.path().join("out.srt")));
         assert!(std::fs::read_to_string(dir.path().join("out.srt")).unwrap().starts_with("1\n00:00:00,000 --> 00:00:01,500\nSo here is the thing\n"));

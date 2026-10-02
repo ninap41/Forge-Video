@@ -47,7 +47,33 @@ describe("ExportDialog", () => {
     await w.setProps({ open: true });
     await flush();
     expect(w.find("h2").text()).toBe("Export");
-    expect(api.exportPlan).toHaveBeenCalledWith({ destination: "/tmp/forge-video-preview.mp4", quality: "Standard", audio_only: false });
+    expect(api.exportPlan).toHaveBeenCalledWith({ destination: "/tmp/forge-video-preview.mp4", quality: "Standard", audio_only: false, range: null });
+  });
+
+  it("preselects the selected range when opened and lets the user flip back to the whole timeline", async () => {
+    const { store, w } = setup(false);
+    expect(w.find("[data-testid=export-range]").exists()).toBe(false);
+    store.setRange({ start: 1000, end: 3000 });
+    store.project = { ...store.project!, loops: [{ id: "l1", name: "Hook", start: 1000, end: 3000 }] };
+    store.selectLoop("l1");
+    await w.setProps({ open: true });
+    await flush();
+    expect(w.find("[data-testid=export-range]").text()).toContain("Range · Hook");
+    expect(api.exportPlan).toHaveBeenLastCalledWith(expect.objectContaining({ range: { start: 1000, end: 3000 } }));
+    saveDialog.mockResolvedValueOnce("/out/Reel - Hook.mp4");
+    await btn(w, "Export").trigger("click");
+    await flush();
+    expect(saveDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "Reel - Hook.mp4" }));
+    expect(api.exportStart).toHaveBeenCalledWith(expect.objectContaining({ range: { start: 1000, end: 3000 } }), []);
+    doneCb({ job_id: "job-1", kind: "export", result: { destination: "/out/Reel - Hook.mp4", strategy: "HardwareEncode" } });
+    await flush();
+    await btn(w, "Close").trigger("click");
+    await w.setProps({ open: false });
+    await w.setProps({ open: true });
+    await flush();
+    await btn(w, "Whole timeline").trigger("click");
+    await flush();
+    expect(api.exportPlan).toHaveBeenLastCalledWith(expect.objectContaining({ range: null }));
   });
 
   it("explains the stream-copy strategy", async () => {
@@ -105,7 +131,7 @@ describe("ExportDialog", () => {
     await btn(w, "Export").trigger("click");
     await flush();
     expect(saveDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "Reel.mp4" }));
-    expect(api.exportStart).toHaveBeenCalledWith({ destination: "/out/Reel.mp4", quality: "Standard", audio_only: false }, []);
+    expect(api.exportStart).toHaveBeenCalledWith({ destination: "/out/Reel.mp4", quality: "Standard", audio_only: false, range: null }, []);
     expect(store.playing).toBe(false);
     expect(w.text()).toContain("0%");
     expect(btn(w, "Cancel")).toBeTruthy();

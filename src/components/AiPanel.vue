@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { computed, onMounted } from "vue";
 import { useProjectStore } from "../stores/project";
-import type { Highlight } from "../types/project";
-import { basename, fmtMs } from "../utils/time";
+import type { Highlight, Range } from "../types/project";
+import { sameRange } from "../types/project";
+import { fmtMs } from "../utils/time";
 
-const emit = defineEmits<{ "open-project": [path: string] }>();
 const store = useProjectStore();
 
 onMounted(() => void store.refreshAiStatus());
@@ -42,27 +41,21 @@ const pending = computed(() => {
 
 const secs = (ms: number) => `${(ms / 1000).toFixed(ms % 1000 ? 1 : 0)} s`;
 const kept = (h: Highlight) => h.keep.reduce((n, r) => n + (r.end - r.start), 0);
-/** The plan as steps, in the order Apply carries them out. */
+/** Claude's suggested cut, as steps to do by hand after exporting the section. */
 function steps(h: Highlight): string[] {
-  const out = ["New project in Shorts / Reels 9:16"];
+  const out: string[] = [];
   const cut = h.end - h.start - kept(h);
   out.push(`Keep ${h.keep.map((r) => `${fmtMs(r.start, false)}–${fmtMs(r.end, false)}`).join(", ")} (${secs(kept(h))})`);
   if (cut > 0) out.push(`Cut ${secs(cut)} of filler`);
   if (h.fade_in || h.fade_out) out.push([h.fade_in ? `Fade in ${secs(h.fade_in)}` : "", h.fade_out ? `Fade out ${secs(h.fade_out)}` : ""].filter(Boolean).join(" · "));
-  out.push("Captions carried over");
+  out.push("Captions come along in the .srt");
   return out;
 }
-
-/** Shorts created in this session, by highlight id. */
-const created = ref<Record<string, string>>({});
-const applying = ref<string | null>(null);
-async function apply(h: Highlight) {
-  applying.value = h.id;
-  const path = await store.applyHighlight(h.id);
-  applying.value = null;
-  if (path) created.value[h.id] = path;
-}
-function show(h: Highlight) { store.playing = false; store.seek(h.start); }
+const rangeOf = (h: Highlight): Range => ({ start: h.start, end: h.end });
+/** Show: seek to it and select its span, so the yellow band shows what the card refers to. */
+function show(h: Highlight) { store.playing = false; store.setRange(rangeOf(h)); store.seek(h.start); }
+const looping = (h: Highlight) => store.playing && store.loopOn && sameRange(store.range, rangeOf(h));
+const pinned = (h: Highlight) => store.loops.some((l) => sameRange(l, rangeOf(h)));
 </script>
 
 <template>
@@ -160,14 +153,17 @@ function show(h: Highlight) { store.playing = false; store.seek(h.start); }
       <ul v-if="h.notes.length" class="mt-2 space-y-0.5 text-muted">
         <li v-for="n in h.notes" :key="n">By hand: {{ n }}</li>
       </ul>
-      <div v-if="created[h.id]" class="mt-2">
-        <div class="font-mono truncate text-fg" :title="created[h.id]">{{ basename(created[h.id]) }}</div>
-        <div class="flex gap-2 mt-1">
-          <button class="rounded bg-accent text-black font-medium px-2 py-1" @click="emit('open-project', created[h.id])">Open</button>
-          <button class="rounded border border-line px-2 py-1" @click="revealItemInDir(created[h.id])">Reveal in Finder</button>
-        </div>
+      <div class="flex items-center gap-1 mt-2">
+        <button class="rounded bg-accent text-black font-medium px-2 py-1" title="Export just this section of the timeline" data-testid="hl-export" @click="store.exportRange(rangeOf(h))">Export short</button>
+        <button
+          class="rounded border px-2 py-1" :class="looping(h) ? 'border-yellow-400 text-yellow-400 bg-yellow-400/10' : 'border-line hover:border-muted'" data-testid="hl-play"
+          :title="looping(h) ? 'Pause' : 'Play this section on repeat'" :aria-label="`${looping(h) ? 'Pause' : 'Play'} ${h.title}`" @click="store.playRange(rangeOf(h))"
+        >{{ looping(h) ? '❚❚' : '▶' }}</button>
+        <button
+          class="rounded border border-line px-2 py-1 hover:border-muted disabled:opacity-40" data-testid="hl-pin" :disabled="pinned(h)"
+          :title="pinned(h) ? 'Already in Pinned loops' : 'Keep this section in Pinned loops'" @click="store.loopAdd(h.title, rangeOf(h))"
+        >{{ pinned(h) ? 'Pinned' : 'Pin loop' }}</button>
       </div>
-      <button v-else class="mt-2 rounded bg-accent text-black font-medium px-2 py-1 disabled:opacity-40" :disabled="applying === h.id" @click="apply(h)">Create short</button>
     </section>
   </aside>
 </template>

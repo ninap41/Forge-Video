@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useProjectStore } from "../stores/project";
 import MuteToggle from "./MuteToggle.vue";
-import { ASPECT_PRESETS, PLACEMENT_BADGE, PLACEMENT_FULL, TEXT_SIZE_MAX, TEXT_SIZE_MIN, clipDuration, clipName, type TextStyle, type Transition } from "../types/project";
+import { ASPECT_PRESETS, PLACEMENT_BADGE, PLACEMENT_FULL, TEXT_SIZE_MAX, TEXT_SIZE_MIN, clipDuration, clipName, type TextStyle, type Transition, scaleToZoom, zoomToScale } from "../types/project";
 import { fmtMs } from "../utils/time";
 
 const store = useProjectStore();
@@ -11,6 +11,15 @@ const isLast = computed(() => store.selectedIndex === store.clips.length - 1);
 const ov = computed(() => store.selectedOverlay);
 const au = computed(() => store.selectedAudio);
 const cap = computed(() => store.selectedCaptions);
+/** Inline caption editing in the list below; Enter / blur commit, Escape cancels, blank removes the cue. */
+const editingCue = ref<string | null>(null);
+function commitCue(id: string, before: string, e: Event) {
+  if (editingCue.value !== id) return; // Escape already closed it
+  editingCue.value = null;
+  const text = (e.target as HTMLInputElement).value.trim();
+  if (text !== before) void store.setCueText(id, text);
+}
+const vFocus = { mounted: (el: HTMLInputElement) => { el.focus(); el.select(); } };
 const tx = computed(() => store.selectedText);
 
 // Debounced slider commits: sliders update a local copy, commit on change (pointer release).
@@ -83,8 +92,10 @@ const fontCss = (f: string) => `"${f.replace(/"/g, "")}", sans-serif`;
 const fontChoices = computed(() => (t.value.style.font && !store.fonts.includes(t.value.style.font) ? [t.value.style.font, ...store.fonts] : store.fonts));
 
 const crop = computed(() => store.project?.crop ?? { scale: 1, x: 0.5, y: 0.5 });
-const cropScale = ref(1);
-watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
+/** Zoom slider position, -100 … 100 (0 = fills the frame); see zoomToScale. */
+const cropZoom = ref(0);
+watch(crop, (c) => { cropZoom.value = Math.round(scaleToZoom(c.scale)); }, { immediate: true });
+const cropScale = computed(() => zoomToScale(cropZoom.value));
 </script>
 
 <template>
@@ -105,9 +116,14 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
       </div>
       <label class="flex items-center gap-2 mt-3">
         <span class="w-14 text-muted">Zoom</span>
-        <input type="range" min="1" max="4" step="0.01" v-model.number="cropScale" class="flex-1" @change="store.setCrop({ ...crop, scale: cropScale })" />
-        <span class="w-10 text-right font-mono">{{ cropScale.toFixed(2) }}×</span>
+        <input
+          type="range" min="-100" max="100" step="1" v-model.number="cropZoom" class="flex-1" data-testid="crop-zoom" list="zoom-stops"
+          :title="`${cropZoom > 0 ? '+' : ''}${cropZoom} · ${cropScale.toFixed(2)}×`" @change="store.setCrop({ ...crop, scale: Number(cropScale.toFixed(4)) })"
+        />
+        <datalist id="zoom-stops"><option value="0" /></datalist>
+        <span class="w-10 text-right font-mono" data-testid="crop-zoom-label">{{ cropZoom > 0 ? '+' : '' }}{{ cropZoom }}</span>
       </label>
+      <div class="flex justify-between text-[10px] text-muted/70 px-16"><span>−100 · out</span><span>0</span><span>+100 · in</span></div>
       <button class="mt-1 text-muted hover:text-fg" @click="store.setCrop({ scale: 1, x: 0.5, y: 0.5 })">Reset framing</button>
     </section>
 
@@ -162,6 +178,10 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
           <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" :disabled="!store.current || store.current.clip.id !== clip.id" @click="store.splitAtPlayhead()">Split at playhead (⌘T)</button>
           <button class="rounded border border-line px-2 py-1 text-danger hover:border-danger" @click="store.deleteClip(clip.id)">Delete</button>
         </div>
+        <button
+          v-if="store.selectedAll.length >= 2" class="w-full rounded border border-line px-2 py-1 mt-1 hover:border-muted" data-testid="join"
+          title="Join the selected pieces of one file back into a single clip" @click="store.mergeSelected()"
+        >Join {{ store.selectedAll.length }} clips (⌘J)</button>
       </template>
     </section>
 
@@ -215,12 +235,16 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
         <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" @click="store.splitAtPlayhead()">Split at playhead (⌘T)</button>
         <button class="rounded border border-line px-2 py-1 text-danger hover:border-danger" @click="store.deleteSelected()">Delete</button>
       </div>
+      <button
+        v-if="store.selectedAll.length >= 2" class="w-full rounded border border-line px-2 py-1 mt-1 hover:border-muted" data-testid="join"
+        title="Join the selected pieces of one file back into a single clip" @click="store.mergeSelected()"
+        >Join {{ store.selectedAll.length }} clips (⌘J)</button>
     </section>
 
     <!-- Text track (T1) -->
     <section v-if="tx" class="p-3 border-b border-line" data-testid="text-section">
       <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Title</h3>
-      <div class="text-muted mb-2">At {{ fmtMs(tx.timeline_start) }} · {{ fmtMs(tx.duration) }} · burned into the video above every track</div>
+      <div class="text-muted mb-2">At {{ fmtMs(tx.timeline_start) }} · {{ fmtMs(tx.duration) }} · row T{{ tx.layer + 1 }} · burned into the video above every track</div>
       <textarea
         v-model="t.style.text" rows="3" maxlength="500" data-testid="text-text" aria-label="Title text" placeholder="Title (Enter for a new line)"
         class="w-full bg-panel-2 border border-line rounded px-2 py-1 text-fg resize-y" @change="commitStyle"
@@ -283,7 +307,18 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
         <span>{{ store.captionsEnabled ? 'Captions on' : 'Captions off' }}</span>
       </label>
       <div class="text-muted/70 mt-1">{{ store.captionsEnabled ? 'Shown in the preview; export writes an .srt beside the video.' : 'Hidden in the preview; export writes no .srt. The transcript is kept.' }}</div>
-      <div class="text-muted/70 mt-1">Double-click a caption on the timeline to correct it.</div>
+      <div class="text-muted/70 mt-1">Click a caption below (or double-click it on the timeline) to correct it; clear the text to remove it.</div>
+      <ol v-if="store.cues.length" class="mt-2 max-h-72 overflow-y-auto divide-y divide-line/50 -mx-1" data-testid="cue-list">
+        <li v-for="c in store.cues" :key="c.id" class="flex gap-2 px-1 py-1" :class="store.currentCue?.id === c.id ? 'bg-accent/10' : ''" data-testid="cue-row">
+          <button class="font-mono text-muted shrink-0 hover:text-fg" :title="`Jump to ${fmtMs(c.start)}`" @click="store.playing = false; store.seek(c.start)">{{ fmtMs(c.start, false) }}</button>
+          <input
+            v-if="editingCue === c.id" v-focus data-testid="cue-edit" aria-label="Caption text" :value="c.text"
+            class="flex-1 min-w-0 bg-panel-2 border border-accent rounded px-1 text-fg"
+            @keydown.stop @keydown.enter="commitCue(c.id, c.text, $event)" @keydown.escape="editingCue = null" @blur="commitCue(c.id, c.text, $event)"
+          />
+          <button v-else class="flex-1 min-w-0 text-left truncate hover:text-accent" :title="c.text" @click="editingCue = c.id">{{ c.text }}</button>
+        </li>
+      </ol>
     </section>
 
     <!-- Audio clip -->
@@ -319,6 +354,10 @@ watch(crop, (c) => { cropScale.value = c.scale; }, { immediate: true });
         <button class="flex-1 rounded border border-line px-2 py-1 hover:border-muted" @click="store.splitAtPlayhead()">Split at playhead (⌘T)</button>
         <button class="rounded border border-line px-2 py-1 text-danger hover:border-danger" @click="store.deleteSelected()">Delete</button>
       </div>
+      <button
+        v-if="store.selectedAll.length >= 2" class="w-full rounded border border-line px-2 py-1 mt-1 hover:border-muted" data-testid="join"
+        title="Join the selected pieces of one file back into a single clip" @click="store.mergeSelected()"
+        >Join {{ store.selectedAll.length }} clips (⌘J)</button>
     </section>
 
     <section v-if="!ov && !au" class="p-3 text-muted/70">

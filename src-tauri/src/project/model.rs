@@ -94,10 +94,15 @@ impl AspectPreset {
 /// (0..1) centre of the visible region in source space. Default = fit centred.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Crop {
+    /// Zoom: 1 fills the frame, up to `CROP_SCALE_MAX` zooms in (crop), down to `CROP_SCALE_MIN` zooms
+    /// out (the source shrinks onto black and may sit partly outside the frame).
     pub scale: f32,
     pub x: f32,
     pub y: f32,
 }
+
+pub const CROP_SCALE_MIN: f32 = 0.25;
+pub const CROP_SCALE_MAX: f32 = 4.0;
 
 impl Default for Crop {
     fn default() -> Self {
@@ -288,13 +293,16 @@ impl Default for TextStyle {
     }
 }
 
-/// A title on the text track (T1): free-positioned in time like a still, centred at `x`/`y`
-/// (normalised), burned into the export above every overlay layer.
+/// A title on a text row (T1 = layer 0, T2 = 1, …): free-positioned in time like a still, centred
+/// at `x`/`y` (normalised), burned into the export above every overlay layer; higher rows on top.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextClip {
     pub id: Uuid,
     #[serde(default)]
     pub name: Option<String>,
+    /// Which text row this title sits on (0 = T1). Files saved before text rows load on T1.
+    #[serde(default)]
+    pub layer: u32,
     pub style: TextStyle,
     pub timeline_start: Ms,
     pub duration: Ms,
@@ -309,6 +317,7 @@ impl TextClip {
         TextClip {
             id: Uuid::new_v4(),
             name: None,
+            layer: 0,
             style: TextStyle { text: text.into(), ..TextStyle::default() },
             timeline_start: 0,
             duration: STILL_DEFAULT_MS,
@@ -431,6 +440,22 @@ pub struct Highlight {
     pub notes: Vec<String>,
 }
 
+/// A pinned span of the timeline the user can play on repeat and export on its own. Times are
+/// *timeline* time; like highlights, loops are not shifted by edits, only clamped and dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Loop {
+    pub id: Uuid,
+    pub name: String,
+    pub start: Ms,
+    pub end: Ms,
+}
+
+impl Loop {
+    pub fn range(&self) -> Range {
+        Range { start: self.start, end: self.end }
+    }
+}
+
 /// The pre-v2 single music bed. Only ever read, then migrated into an `AudioTrack`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LegacyMusic {
@@ -461,9 +486,12 @@ pub struct Project {
     /// One entry per overlay row; `relayout` keeps it the same length as `overlay_layers`.
     #[serde(default)]
     pub overlay_audio: Vec<LayerAudio>,
-    /// Titles on the single text track (T1).
+    /// Titles on the text rows T1, T2, … (`TextClip::layer`).
     #[serde(default)]
     pub texts: Vec<TextClip>,
+    /// Number of text rows shown. Always ≥ 1 and ≥ every title's layer + 1.
+    #[serde(default = "one")]
+    pub text_layers: u32,
     /// Track-level mute for V1: every clip's audio is silenced on export and in the preview.
     #[serde(default)]
     pub video_muted: bool,
@@ -481,6 +509,9 @@ pub struct Project {
     pub captions_enabled: bool,
     #[serde(default)]
     pub highlights: Vec<Highlight>,
+    /// Pinned loops (see `Loop`).
+    #[serde(default)]
+    pub loops: Vec<Loop>,
     /// v1 files only; `migrate` folds it into `audio_tracks` and clears it. Never written.
     #[serde(default, skip_serializing)]
     pub music: Option<LegacyMusic>,
@@ -501,6 +532,7 @@ impl Project {
             overlay_layers: 1,
             overlay_audio: vec![LayerAudio::default()],
             texts: Vec::new(),
+            text_layers: 1,
             video_muted: false,
             video_volume: 1.0,
             audio_tracks: Vec::new(),
@@ -508,6 +540,7 @@ impl Project {
             transcripts: Vec::new(),
             captions_enabled: true,
             highlights: Vec::new(),
+            loops: Vec::new(),
             music: None,
             fps: None,
         }
@@ -536,6 +569,9 @@ impl Project {
     }
     pub fn text_index(&self, id: Uuid) -> Option<usize> {
         self.texts.iter().position(|c| c.id == id)
+    }
+    pub fn loop_index(&self, id: Uuid) -> Option<usize> {
+        self.loops.iter().position(|l| l.id == id)
     }
     pub fn audio_track_index(&self, id: Uuid) -> Option<usize> {
         self.audio_tracks.iter().position(|t| t.id == id)
@@ -729,6 +765,8 @@ mod tests {
         assert!(p.transcripts.is_empty() && p.highlights.is_empty() && p.texts.is_empty());
         assert!(p.captions_enabled);
         assert_eq!(p.overlay_layers, 1);
+        assert_eq!(p.text_layers, 1);
+        assert!(p.loops.is_empty());
         assert!(!p.video_muted);
         assert_eq!(p.video_volume, 1.0);
     }
@@ -786,7 +824,10 @@ mod tests {
         p.crop = Crop { scale: 1.5, x: 0.2, y: 0.8 };
         let mut tc = TextClip::new("Hi\nthere");
         tc.style.backdrop = Some(Backdrop { color: "#000000".into(), opacity: 0.5 });
+        tc.layer = 1;
         p.texts.push(tc);
+        p.text_layers = 2;
+        p.loops.push(Loop { id: Uuid::new_v4(), name: "Hook".into(), start: 1000, end: 4000 });
         p.transcripts.push(Transcript { source: PathBuf::from("/a.mp4"), cues: vec![Cue { id: Uuid::new_v4(), start: 0, end: 900, text: "hello".into() }] });
         p.highlights.push(Highlight {
             id: Uuid::new_v4(), title: "Hook".into(), reason: "r".into(), start: 0, end: 3000,
@@ -796,5 +837,14 @@ mod tests {
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
         assert!(json.contains(r#""aspect":"YouTube16x9""#));
+    }
+
+    #[test]
+    fn titles_saved_before_text_rows_load_on_t1() {
+        let j = r##"{"id":"6f6f5c1e-0000-4000-8000-000000000001","style":{"text":"Hi","font":"Quicksand","size":0.08,"color":"#ffffff","backdrop":null},
+            "timeline_start":0,"duration":5000,"fade_in":0,"fade_out":0,"x":0.5,"y":0.85}"##;
+        let t: TextClip = serde_json::from_str(j).unwrap();
+        assert_eq!(t.layer, 0);
+        assert_eq!(Loop { id: Uuid::nil(), name: "x".into(), start: 1, end: 2 }.range(), Range { start: 1, end: 2 });
     }
 }

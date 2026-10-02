@@ -37,20 +37,21 @@ const btn = (w: ReturnType<typeof mount>, t: string) => w.findAll("button").find
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("MediaPool", () => {
-  it("tabs filter by kind and show counts; All is the default and lists everything", async () => {
+  it("the filter dropdown narrows by kind and shows counts; All is the default and lists everything", async () => {
     const { w } = setup();
-    expect(w.text()).toContain("All 4");
-    expect(w.text()).toContain("Clips 2");
-    expect(w.text()).toContain("Audio 1");
-    expect(w.text()).toContain("Images 1");
+    expect(w.text()).toContain("All (4)");
+    expect((w.find("[data-testid=pool-filter]").element as HTMLSelectElement).value).toBe("All");
+    expect(w.text()).toContain("Clips (2)");
+    expect(w.text()).toContain("Audio (1)");
+    expect(w.text()).toContain("Images (1)");
     for (const n of ["a.mp4", "b.mov", "bed.m4a", "logo.png"]) expect(w.text()).toContain(n);
-    await btn(w, "Clips").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Video");
     expect(w.text()).toContain("a.mp4");
     expect(w.text()).not.toContain("bed.m4a");
-    await btn(w, "Audio").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Audio");
     expect(w.text()).toContain("bed.m4a");
     expect(w.text()).not.toContain("a.mp4");
-    await btn(w, "Images").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Image");
     expect(w.text()).toContain("logo.png");
     expect(w.find("img").attributes("src")).toBe("asset://localhost/images/logo.png");
     const { w: empty } = setup(project([]));
@@ -59,7 +60,7 @@ describe("MediaPool", () => {
 
   it("toggles grid / list and persists the choice", async () => {
     const { store, w } = setup();
-    await btn(w, "Clips").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Video");
     expect(w.find("table").exists()).toBe(false);
     await w.find("button[aria-label='List view']").trigger("click");
     expect(store.poolView).toBe("list");
@@ -73,13 +74,13 @@ describe("MediaPool", () => {
 
   it("Import… opens a dialog filtered by the active tab and adds to the pool", async () => {
     const { w } = setup();
-    await btn(w, "Clips").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Video");
     dialogOpen.mockResolvedValueOnce(["/v/1.mp4", "/v/2.mp4"]);
     await btn(w, "Import…").trigger("click");
     await flush();
     expect(dialogOpen).toHaveBeenCalledWith(expect.objectContaining({ multiple: true, filters: [expect.objectContaining({ name: "Clips" })] }));
     expect(api.poolAdd.mock.calls).toEqual([["/v/1.mp4"], ["/v/2.mp4"]]);
-    await btn(w, "Images").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Image");
     dialogOpen.mockResolvedValueOnce("/i/x.png");
     await btn(w, "Import…").trigger("click");
     await flush();
@@ -97,12 +98,12 @@ describe("MediaPool", () => {
     const cards = w.findAll("[data-testid=pool-items] > div > div");
     await cards[1].trigger("dblclick");
     expect(api.clipInsert).toHaveBeenCalledWith("/videos/b.mov", 1);
-    await btn(w, "Images").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Image");
     await w.find("[data-testid=pool-items] > div > div").trigger("dblclick");
     expect(api.clipInsert).toHaveBeenLastCalledWith("/images/logo.png", 1);
     expect(api.overlayAdd).not.toHaveBeenCalled();
     // audio with no track yet: a Music track is created first
-    await btn(w, "Audio").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Audio");
     const withTrack = project([clip({ id: "a" })], { pool: items(), audio_tracks: [audioTrack([], { id: "t1" })] });
     api.audioTrackAdd.mockImplementationOnce(() => Promise.resolve(withTrack));
     await w.find("[data-testid=pool-items] > div > div").trigger("dblclick");
@@ -149,7 +150,7 @@ describe("MediaPool", () => {
 
   it("dropping audio inside the timeline with no audio track shows a banner instead of silently doing nothing", async () => {
     const { store, w } = setup();
-    await btn(w, "Audio").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Audio");
     const card = w.find("[data-testid=pool-items] > div > div");
     const tracks = document.createElement("div");
     tracks.dataset.testid = "timeline-tracks";
@@ -173,7 +174,7 @@ describe("MediaPool", () => {
     window.dispatchEvent(new PointerEvent("pointerup", { clientX: 60, clientY: 40 }));
     expect(store.notice).toBeNull();
     // and a video card released off any row says nothing
-    await btn(w, "Clips").trigger("click");
+    await w.find("[data-testid=pool-filter]").setValue("Video");
     const video = w.find("[data-testid=pool-items] > div > div");
     await video.trigger("pointerdown", { button: 0, clientX: 10, clientY: 10 });
     window.dispatchEvent(new PointerEvent("pointermove", { clientX: 60, clientY: 40 }));

@@ -1,20 +1,21 @@
 <script lang="ts">
 // Single source of truth for the hot-key list (also asserted by App.test.ts and mirrored in README.md).
 export const SHORTCUTS: { keys: string; action: string }[] = [
-  { keys: "Space", action: "Play / pause" },
+  { keys: "Space", action: "Play / pause (a loaded loop restarts from its beginning)" },
   { keys: "⌘ T", action: "Split selected clip at playhead" },
   { keys: "⌘ J", action: "Join (merge) the selected clips (⇧-click to select several)" },
   { keys: "⌫ / Delete", action: "Delete selected clip" },
   { keys: "← / →", action: "Nudge playhead one frame" },
   { keys: "⇧ ← / ⇧ →", action: "Nudge playhead one second" },
   { keys: "Home / End", action: "Jump to start / end" },
+  { keys: "L", action: "Loop the selected range" },
   { keys: "⌘ I", action: "Import media…" },
   { keys: "⌘ O", action: "Open project…" },
   { keys: "⌘ S", action: "Save project" },
   { keys: "⇧ ⌘ S", action: "Save project as…" },
   { keys: "⌘ E", action: "Export…" },
   { keys: "?", action: "Show this help" },
-  { keys: "Esc", action: "Close dialog" },
+  { keys: "Esc", action: "Close dialog / clear the range" },
 ];
 
 export const MOUSE: { keys: string; action: string }[] = [
@@ -23,9 +24,11 @@ export const MOUSE: { keys: string; action: string }[] = [
   { keys: "Drag overlay / audio clip", action: "Move it in time, or to another layer / track" },
   { keys: "Drag from media pool", action: "Place on a track at that time" },
   { keys: "Double-click pool item", action: "Place it at the playhead" },
-  { keys: "Click ruler / drag", action: "Scrub the playhead" },
+  { keys: "Click ruler", action: "Scrub the playhead (outside a range clears it)" },
+  { keys: "Drag on ruler", action: "Select a range (yellow) · ⟳ loops it, Pin keeps it" },
+  { keys: "Drag range edge", action: "Resize the range" },
   { keys: "Drag preview", action: "Reposition the crop, or place the selected overlay" },
-  { keys: "Scroll on preview", action: "Zoom the crop, or resize the selected overlay" },
+  { keys: "Scroll on preview", action: "Zoom in or out (down to 0.25×), or resize the selected overlay" },
   { keys: "Drop media files", action: "Add to the media pool" },
 ];
 </script>

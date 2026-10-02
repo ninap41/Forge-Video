@@ -47,6 +47,8 @@ beforeEach(() => {
   Object.values(dialog).forEach((d) => d.mockReset());
   setTitle.mockClear(); unlistenDrop.mockClear(); dropHandler = undefined;
   localStorage.setItem(WELCOME_KEY, "1"); // every suite but "first launch" is past the welcome dialog
+  localStorage.removeItem("forgevideo.lastProject");
+  localStorage.removeItem("forgevideo.libraryWidth"); localStorage.removeItem("forgevideo.loopsHeight");
 });
 
 describe("App shell", () => {
@@ -169,6 +171,20 @@ describe("App shell", () => {
     expect(store.dirty).toBe(false);
   });
 
+  it("Open and Save dialogs start in the last project's folder", async () => {
+    localStorage.setItem("forgevideo.lastProject", "/work/reels/last.forgevideo");
+    const { w } = await setup();
+    expect(api.projectOpen).toHaveBeenCalledWith("/work/reels/last.forgevideo");
+    dialog.open.mockResolvedValueOnce(null);
+    await btn(w, "Open").trigger("click");
+    await flush();
+    expect(dialog.open).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "/work/reels" }));
+    dialog.save.mockResolvedValueOnce(null);
+    key({ key: "s", metaKey: true, shiftKey: true }); // Save as… always asks
+    await flush();
+    expect(dialog.save).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "/work/reels/Test.forgevideo" }));
+  });
+
   it("Save writes in place when a path is known, otherwise asks for one", async () => {
     const { w } = await setup();
     await btn(w, "Save").trigger("click");
@@ -184,7 +200,7 @@ describe("App shell", () => {
   });
 
   it("opens the export dialog from the button and ⌘E", async () => {
-    const { w } = await setup();
+    const { w, store } = await setup();
     expect(w.find("h2").exists()).toBe(false);
     await btn(w, "Export…").trigger("click");
     await flush();
@@ -194,6 +210,40 @@ describe("App shell", () => {
     key({ key: "e", metaKey: true });
     await flush();
     expect(w.find("h2").text()).toBe("Export");
+    expect(store.exportOpen).toBe(true);
+  });
+
+  it("Space with a pinned loop loaded restarts it from the beginning, like GarageBand's cycle", async () => {
+    const { store } = await setup();
+    store.project = { ...store.project!, loops: [{ id: "l1", name: "Hook", start: 2000, end: 5000 }] };
+    store.selectLoop("l1");
+    expect(store.loopOn).toBe(true);
+    store.playhead = 3500;
+    key({ code: "Space" });
+    expect([store.playing, store.playhead]).toEqual([true, 2000]);
+    key({ code: "Space" });
+    expect(store.playing).toBe(false);
+    store.playhead = 4000;
+    key({ code: "Space" });
+    expect(store.playhead).toBe(2000);
+    // without a loop, Space resumes where the playhead is
+    store.playing = false;
+    store.setRange(null);
+    store.playhead = 1234;
+    key({ code: "Space" });
+    expect([store.playing, store.playhead]).toEqual([true, 1234]);
+  });
+
+  it("L loops the selected range and Escape clears it when no dialog is open", async () => {
+    const { store } = await setup();
+    key({ key: "l" });
+    expect(store.loopOn).toBe(false);
+    store.setRange({ start: 1000, end: 3000 });
+    key({ key: "l" });
+    expect(store.loopOn).toBe(true);
+    key({ key: "Escape" });
+    expect(store.range).toBeNull();
+    expect(store.loopOn).toBe(false);
   });
 });
 
@@ -380,25 +430,50 @@ describe("AI mode", () => {
     expect(w.text()).toContain("Output");
   });
 
-  it("opening a created short asks before discarding unsaved changes", async () => {
+  it("the green highlight bands show only while the AI panel is open", async () => {
     const { w, store } = await setup();
     store.project = { ...base, highlights: [{ id: "h1", title: "Hook", reason: "", start: 0, end: 4000, keep: [{ start: 0, end: 4000 }], fade_in: 0, fade_out: 0, notes: [] }] };
+    await flush();
+    expect(w.findAll("[data-testid=highlight-band]")).toHaveLength(0);
     await w.find("[data-testid=ai-toggle]").trigger("click");
     await flush();
-    await btn(w, "Create short").trigger("click");
+    expect(w.findAll("[data-testid=highlight-band]")).toHaveLength(1);
+    await w.find("[data-testid=ai-toggle]").trigger("click");
     await flush();
-    api.projectOpen.mockClear();
-    store.dirty = true;
-    dialog.ask.mockResolvedValueOnce(false);
-    await btn(w, "Open").trigger("click");
+    expect(w.findAll("[data-testid=highlight-band]")).toHaveLength(0);
+    expect(store.highlights).toHaveLength(1);
+  });
+
+  it("the library column and the Pinned loops drawer resize by dragging, within limits, and remember it", async () => {
+    const { w, store } = await setup();
+    const lib = w.find("[data-testid=library]").element as HTMLElement;
+    expect(lib.style.width).toBe("288px");
+    const col = w.find("[data-testid=library-resize]");
+    (col.element as HTMLElement).setPointerCapture = () => {};
+    await col.trigger("pointerdown", { clientX: 288, pointerId: 1 });
+    await col.trigger("pointermove", { clientX: 400 });
+    expect(store.libraryWidth).toBe(400);
+    await col.trigger("pointermove", { clientX: 50 });
+    expect(store.libraryWidth).toBe(200);
+    await col.trigger("pointerup");
+    await col.trigger("pointermove", { clientX: 600 });
+    expect(store.libraryWidth).toBe(200);
     await flush();
-    expect(dialog.ask).toHaveBeenCalled();
-    expect(api.projectOpen).not.toHaveBeenCalled();
-    dialog.ask.mockResolvedValueOnce(true);
-    await w.findAll("[data-testid=ai-panel] button").find((b) => b.text() === "Open")!.trigger("click");
+    expect(localStorage.getItem("forgevideo.libraryWidth")).toBe("200");
+    const row = w.find("[data-testid=loops-resize]");
+    (row.element as HTMLElement).setPointerCapture = () => {};
+    await row.trigger("pointerdown", { clientY: 120, pointerId: 1 });
+    await row.trigger("pointermove", { clientY: 200 });
+    expect(store.loopsHeight).toBe(200);
+    await row.trigger("pointermove", { clientY: 0 });
+    expect(store.loopsHeight).toBe(60);
+    await row.trigger("pointerup");
     await flush();
-    expect(api.projectOpen).toHaveBeenCalledWith("/videos/Test - The hook.forgevideo");
-    expect(store.dirty).toBe(false);
+    expect(localStorage.getItem("forgevideo.loopsHeight")).toBe("60");
+    expect((w.find("[data-testid=loops-drawer]").element as HTMLElement).style.height).toBe("60px");
+    store.loopsOpen = false;
+    await flush();
+    expect(w.find("[data-testid=loops-resize]").exists()).toBe(false);
   });
 });
 

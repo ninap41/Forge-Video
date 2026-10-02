@@ -32,7 +32,7 @@ describe("api → invoke mapping", () => {
     await api.audioClipAdd("t", "/m.m4a", 250);
     await api.audioClipSet("c", 0.5, 1, 2, false);
     await api.cacheThumbnails("/v.mp4", 5000);
-    await api.exportStart({ destination: "/o.mp4", quality: "High", audio_only: false });
+    await api.exportStart({ destination: "/o.mp4", quality: "High", audio_only: false, range: null });
     await api.jobCancel("j");
     await api.ffmpegStatus();
     expect(invoke.mock.calls).toEqual([
@@ -53,7 +53,7 @@ describe("api → invoke mapping", () => {
       ["audio_clip_add", { trackId: "t", path: "/m.m4a", at: 250 }],
       ["audio_clip_set", { id: "c", volume: 0.5, fadeIn: 1, fadeOut: 2, muted: false }],
       ["cache_thumbnails", { path: "/v.mp4", durationMs: 5000 }],
-      ["export_start", { settings: { destination: "/o.mp4", quality: "High", audio_only: false }, texts: [] }],
+      ["export_start", { settings: { destination: "/o.mp4", quality: "High", audio_only: false, range: null }, texts: [] }],
       ["job_cancel", { jobId: "j" }],
       ["ffmpeg_status"],
     ]);
@@ -79,7 +79,8 @@ describe("api → invoke mapping", () => {
     await api.overlayMove("o", 1, 0); await api.overlayLayerAdd(); await api.overlayLayerRemove(1); await api.overlayTrim("o", 0, 1); await api.overlaySplit("o", 1); await api.overlayDelete("o"); await api.overlaySetFades("o", 1, 2); await api.overlaySetAudio("o", 0.5, true); await api.overlaySetOpacity("o", 0.5); await api.overlayLayerSetAudio(1, true, 0.5);
     await api.audioTrackAdd("SFX"); await api.audioTrackUpdate("t", "x", true, 0.5); await api.audioTrackRemove("t");
     await api.audioClipMove("c", "t", 1); await api.audioClipTrim("c", 0, 1); await api.audioClipSplit("c", 1); await api.audioClipDelete("c");
-    await api.cacheWaveform("/v.mp4"); await api.exportPlan({ destination: "/o", quality: "Draft", audio_only: true });
+    await api.cacheWaveform("/v.mp4"); await api.exportPlan({ destination: "/o", quality: "Draft", audio_only: true, range: null });
+    await api.textAdd("Hi", 1.4, 1); await api.textMove("t", 2, 0); await api.textLayerAdd(); await api.textLayerRemove(1); await api.loopAdd("Hook", 1000.4, 4000); await api.loopRemove("l");
     expect(invoke.mock.calls.map((c) => c[0])).toEqual([
       "project_get", "project_open", "project_set_aspect", "project_set_crop", "project_set_video_muted", "project_set_video_volume", "project_set_captions_enabled", "media_import", "clip_delete", "clip_insert",
       "pool_add", "pool_remove",
@@ -87,7 +88,9 @@ describe("api → invoke mapping", () => {
       "audio_track_add", "audio_track_update", "audio_track_remove",
       "audio_clip_move", "audio_clip_trim", "audio_clip_split", "audio_clip_delete",
       "cache_waveform", "export_plan",
+      "text_add", "text_move", "text_layer_add", "text_layer_remove", "loop_add", "loop_remove",
     ]);
+    expect(invoke.mock.calls.slice(-6).map((c) => c[1])).toEqual([{ text: "Hi", at: 1, layer: 1 }, { id: "t", at: 2, layer: 0 }, undefined, { layer: 1 }, { name: "Hook", start: 1000, end: 4000 }, { id: "l" }]);
   });
 
   it("maps the AI mode commands", async () => {

@@ -91,7 +91,7 @@ describe("Timeline", () => {
     expect(w.findAllComponents(ClipBlock)[0].props("pxPerMs")).toBeCloseTo(before, 6);
   });
 
-  it("scrubbing the ruler seeks and stops playback", async () => {
+  it("clicking the ruler seeks and stops playback; dragging an empty row scrubs", async () => {
     const { store, w } = setup();
     await w.vm.$nextTick();
     store.playing = true;
@@ -101,11 +101,97 @@ describe("Timeline", () => {
     await w.find(".cursor-text").trigger("pointerdown", { clientX: 24 + 3000 * pxPerMs, pointerId: 1 });
     expect(store.playing).toBe(false);
     expect(store.playhead).toBeCloseTo(3000, 3);
+    await w.find(".overflow-x-auto").trigger("pointermove", { clientX: 24 + 3000 * pxPerMs + 2 });
+    expect(store.range).toBeNull();
+    await w.find(".overflow-x-auto").trigger("pointerup");
+    // a drag on the V1 row's empty area still scrubs
+    await w.find("[data-row=video]").trigger("pointerdown", { clientX: 24 + 3000 * pxPerMs, pointerId: 1 });
     await w.find(".overflow-x-auto").trigger("pointermove", { clientX: 24 + 6000 * pxPerMs });
     expect(store.playhead).toBeCloseTo(6000, 3);
     await w.find(".overflow-x-auto").trigger("pointerup");
     await w.find(".overflow-x-auto").trigger("pointermove", { clientX: 24 });
     expect(store.playhead).toBeCloseTo(6000, 3);
+    expect(store.range).toBeNull();
+  });
+
+  describe("range selection and pinned loops", () => {
+    const px = (ms: number) => 24 + ms * PX_PER_MS;
+    const ready = (w: ReturnType<typeof mount>) => {
+      const scroller = w.find(".overflow-x-auto").element as HTMLElement;
+      scroller.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1024, height: 200, right: 1024, bottom: 200, x: 0, y: 0, toJSON() {} });
+    };
+    const style = (w: ReturnType<typeof mount>, sel: string) => (w.find(sel).element as HTMLElement).style;
+
+    it("pinning or picking a loop scrolls the timeline so the loop starts just inside the view", async () => {
+      const { store, w } = setup(project(Array.from({ length: 12 }, (_, i) => clip({ id: `c${i}` })))); // 60 s
+      await w.vm.$nextTick();
+      const scroller = w.find(".overflow-x-auto").element as HTMLElement;
+      Object.defineProperty(scroller, "clientWidth", { value: 1024, configurable: true });
+      let sl = 0; // jsdom ignores scrollLeft writes, so back it with a real value
+      Object.defineProperty(scroller, "scrollLeft", { get: () => sl, set: (v: number) => { sl = v; }, configurable: true });
+      await w.find("input[type=range]").setValue("4"); // zoom in: 60 s no longer fits the view
+      store.project = { ...store.project!, loops: [{ id: "l1", name: "Late", start: 40_000, end: 45_000 }] };
+      store.selectLoop("l1");
+      await w.vm.$nextTick();
+      const pxPerMs = ((1024 - 48) / 60_000) * 4;
+      expect(scroller.scrollLeft).toBeCloseTo(40_000 * pxPerMs + 24 - 40, 0);
+      // already in view: no jump
+      const before = scroller.scrollLeft;
+      store.selectLoop("l1");
+      await w.vm.$nextTick();
+      expect(scroller.scrollLeft).toBe(before);
+      // a freshly pinned range scrolls too
+      scroller.scrollLeft = 0;
+      api.loopAdd.mockImplementationOnce(() => Promise.resolve({ ...store.project!, loops: [{ id: "l2", name: "x", start: 50_000, end: 55_000 }] }));
+      store.setRange({ start: 50_000, end: 55_000 });
+      await store.loopAdd("");
+      await w.vm.$nextTick();
+      expect(scroller.scrollLeft).toBeCloseTo(50_000 * pxPerMs + 24 - 40, 0);
+    });
+
+    it("dragging on the ruler selects a yellow range; handles resize it; clicks outside clear it", async () => {
+      const { store, w } = setup(project([clip({ id: "a" }), clip({ id: "b" })])); // 10 s
+      await w.vm.$nextTick();
+      ready(w);
+      expect(w.find("[data-testid=range]").exists()).toBe(false);
+      await w.find(".cursor-text").trigger("pointerdown", { clientX: px(2000), pointerId: 1 });
+      await w.find(".overflow-x-auto").trigger("pointermove", { clientX: px(6000) });
+      expect(store.range).toEqual({ start: 2000, end: 6000 });
+      expect(store.playhead).toBeCloseTo(2000, 3);
+      await w.find(".overflow-x-auto").trigger("pointerup");
+      await w.vm.$nextTick();
+      expect(parseFloat(style(w, "[data-testid=range]").left)).toBeCloseTo(px(2000), 3);
+      expect(parseFloat(style(w, "[data-testid=range]").width)).toBeCloseTo(4000 * PX_PER_MS, 3);
+      expect(w.find("[data-testid=range]").classes()).toContain("pointer-events-none");
+      expect(w.find("[data-testid=range-label]").text()).toBe("0:02–0:06");
+      // the end handle extends it (snapping to the clip edge at 5 s when close)
+      await w.find("[data-testid=range-handle-end]").trigger("pointerdown", { clientX: px(6000), pointerId: 1 });
+      await w.find(".overflow-x-auto").trigger("pointermove", { clientX: px(8000) });
+      expect(store.range).toEqual({ start: 2000, end: 8000 });
+      await w.find(".overflow-x-auto").trigger("pointerup");
+      await w.find("[data-testid=range-handle-start]").trigger("pointerdown", { clientX: px(2000), pointerId: 1 });
+      await w.find(".overflow-x-auto").trigger("pointermove", { clientX: px(5000) + 2 });
+      expect(store.range).toEqual({ start: 5000, end: 8000 });
+      await w.find(".overflow-x-auto").trigger("pointerup");
+      // dragging left of the anchor sorts; ⟳ toggles looping; Esc clears
+      await w.find("[data-testid=loop-toggle]").trigger("click");
+      expect(store.loopOn).toBe(true);
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      expect(store.range).toBeNull();
+      expect(store.loopOn).toBe(false);
+      await w.find(".cursor-text").trigger("pointerdown", { clientX: px(7000), pointerId: 1 });
+      await w.find(".overflow-x-auto").trigger("pointermove", { clientX: px(3000) });
+      await w.find(".overflow-x-auto").trigger("pointerup");
+      expect(store.range).toEqual({ start: 3000, end: 7000 });
+      // a click inside keeps the range and scrubs; a click outside clears it
+      await w.find(".cursor-text").trigger("pointerdown", { clientX: px(4000), pointerId: 1 });
+      await w.find(".overflow-x-auto").trigger("pointerup");
+      expect(store.range).toEqual({ start: 3000, end: 7000 });
+      expect(store.playhead).toBeCloseTo(4000, 3);
+      await w.find(".cursor-text").trigger("pointerdown", { clientX: px(9000), pointerId: 1 });
+      await w.find(".overflow-x-auto").trigger("pointerup");
+      expect(store.range).toBeNull();
+    });
   });
 
   it("dragging a trim handle ripples locally and commits a frame-snapped trim on release", async () => {
@@ -203,7 +289,10 @@ describe("Timeline", () => {
     expect(gutterButtons.filter((b) => b.text().startsWith("+ Track"))).toHaveLength(1);
     await w.find("[data-testid=add-track]").trigger("click");
     const items = w.findAll("[data-testid=add-track-menu] button");
-    expect(items.map((b) => b.text())).toEqual(["▶ Video track", "♪ Audio track", "♪ Music track", "♪ Narration track", "♪ SFX track"]);
+    expect(items.map((b) => b.text())).toEqual(["▶ Video track", "♪ Audio track", "♪ Music track", "♪ Narration track", "♪ SFX track", "T Text track"]);
+    await items[5].trigger("click");
+    expect(api.textLayerAdd).toHaveBeenCalled();
+    await w.find("[data-testid=add-track]").trigger("click");
     await items[3].trigger("click");
     expect(api.audioTrackAdd).toHaveBeenCalledWith("Narration");
     expect(w.find("[data-testid=add-track-menu]").exists()).toBe(false);
@@ -470,7 +559,7 @@ describe("Timeline", () => {
       const t = textClip({ id: "t1", timeline_start: 1000, duration: 2000, style: { text: "Hello\nworld", font: "Impact", size: 0.1, color: "#ff0000", backdrop: { color: "#000000", opacity: 0.5 } } });
       const { store, w } = setup(project([clip({ id: "a" })], { texts: [t] }));
       await w.vm.$nextTick();
-      expect(top(w, "[data-row=text]")).toBe(24 + 6);
+      expect(top(w, "[data-row='text:0']")).toBe(24 + 6);
       expect(top(w, "[data-row='overlay:0']")).toBe(24 + 6 + 30 + 6);
       expect(w.find("[data-testid=text-gutter]").text()).toContain("T1 · text");
       const block = w.find("[data-testid=text-block]");
@@ -479,7 +568,7 @@ describe("Timeline", () => {
       expect(parseFloat(block.attributes("style")!.match(/width: ([\d.]+)px/)![1])).toBeCloseTo(2000 * PX_PER_MS, 3);
       store.playhead = 3000;
       await w.find("[data-testid=add-text]").trigger("click");
-      expect(api.textAdd).toHaveBeenCalledWith("Title", 3000);
+      expect(api.textAdd).toHaveBeenCalledWith("Title", 3000, 0);
       // click selects; right-click offers Rename and Delete, never Merge
       await block.trigger("pointerdown", { clientX: 200, pointerId: 1 });
       expect(store.selected).toEqual({ kind: "text", id: "t1" });
@@ -501,7 +590,7 @@ describe("Timeline", () => {
       await block.trigger("pointerdown", { clientX: 200, pointerId: 1 });
       await scroller.trigger("pointermove", { clientX: 200 + 1000 * PX_PER_MS });
       await scroller.trigger("pointerup");
-      expect(api.textMove).toHaveBeenCalledWith("t1", 2000);
+      expect(api.textMove).toHaveBeenCalledWith("t1", 2000, 0);
       // right edge: +500 ms
       const handles = block.findAll(".cursor-ew-resize");
       await handles[1].trigger("pointerdown", { clientX: 300, pointerId: 1 });
@@ -515,15 +604,15 @@ describe("Timeline", () => {
       await scroller.trigger("pointerup");
       await flush();
       expect(api.textTrim).toHaveBeenLastCalledWith("t1", 1500);
-      expect(api.textMove).toHaveBeenLastCalledWith("t1", 1500);
+      expect(api.textMove).toHaveBeenLastCalledWith("t1", 1500, 0);
     });
 
     it("refuses pool drops with a banner", async () => {
       const { store, w } = setup(project([clip({ id: "a" })]));
-      const row = w.find("[data-row=text]");
+      const row = w.find("[data-row='text:0']");
       row.element.dispatchEvent(new CustomEvent("pooldrop", { detail: { item: poolItem({ media: stillMedia() }), clientX: 100 } }));
       await flush();
-      expect(store.notice).toContain("only holds titles");
+      expect(store.notice).toContain("only hold titles");
       expect(api.overlayAdd).not.toHaveBeenCalled();
     });
   });
@@ -602,7 +691,10 @@ describe("Timeline", () => {
     });
 
     it("draws a band over every row for each highlight", async () => {
-      const { w } = setup(project([clip({ id: "a" }), clip({ id: "b", source_end: 4000 })], { highlights: [highlight({ start: 1000, end: 6000 }), highlight({ start: 7000, end: 9000 })] }));
+      const { store, w } = setup(project([clip({ id: "a" }), clip({ id: "b", source_end: 4000 })], { highlights: [highlight({ start: 1000, end: 6000 }), highlight({ start: 7000, end: 9000 })] }));
+      await w.vm.$nextTick();
+      expect(w.findAll("[data-testid=highlight-band]")).toHaveLength(0);
+      store.aiOpen = true;
       await w.vm.$nextTick();
       const bands = w.findAll("[data-testid=highlight-band]");
       expect(bands).toHaveLength(2);

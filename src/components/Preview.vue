@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useProjectStore } from "../stores/project";
 import { api } from "../api/tauri";
-import { ASPECT_PRESETS, TEXT_SIZE_MAX, TEXT_SIZE_MIN, clipDuration, transitionMs, type OverlayClip, type Placement, type TextClip } from "../types/project";
+import { ASPECT_PRESETS, TEXT_SIZE_MAX, TEXT_SIZE_MIN, clipDuration, transitionMs, type OverlayClip, type Placement, type TextClip, CROP_SCALE_MIN, CROP_SCALE_MAX } from "../types/project";
 import { rasterText } from "../utils/textRaster";
 import { basename, clamp } from "../utils/time";
 
@@ -52,21 +52,23 @@ function displaySize() {
   return m.rotation % 180 ? { sw: m.height, sh: m.width } : { sw: m.width, sh: m.height };
 }
 
-/** Mirrors render::graph::crop_scale_filter so the preview matches the export. */
+/** Mirrors render::graph::crop_scale_filter so the preview matches the export: the source point
+ *  (x, y) lands at the frame centre; zoomed in it is clamped so the frame stays inside the source,
+ *  zoomed out (scale < 1) the small picture may sit partly outside the frame. */
 const videoStyle = computed(() => {
-  const { w: W } = frameSize.value;
+  const { w: W, h: H } = frameSize.value;
   const { sw, sh } = displaySize();
   const c = localCrop.value;
   const baseW = Math.min(sw, sh * ratio.value);
   const baseH = baseW / ratio.value;
-  const scale = Math.max(1, c.scale);
+  const scale = Math.max(CROP_SCALE_MIN, c.scale);
+  const k = (W / baseW) * scale;
   const cw = baseW / scale, ch = baseH / scale;
-  const cx = clamp(c.x * sw, cw / 2, sw - cw / 2);
-  const cy = clamp(c.y * sh, ch / 2, sh - ch / 2);
-  const k = W / cw;
+  const cx = scale >= 1 ? clamp(c.x * sw, cw / 2, sw - cw / 2) : c.x * sw;
+  const cy = scale >= 1 ? clamp(c.y * sh, ch / 2, sh - ch / 2) : c.y * sh;
   return {
     width: `${sw * k}px`, height: `${sh * k}px`,
-    left: `${-(cx - cw / 2) * k}px`, top: `${-(cy - ch / 2) * k}px`,
+    left: `${W / 2 - cx * k}px`, top: `${H / 2 - cy * k}px`,
     opacity: String(fadeOpacity.value),
   };
 });
@@ -161,7 +163,7 @@ function onPointerMove(e: PointerEvent) {
   const { sw, sh } = displaySize();
   const { w: W } = frameSize.value;
   const baseW = Math.min(sw, sh * ratio.value);
-  const k = W / (baseW / Math.max(1, localCrop.value.scale));
+  const k = (W / baseW) * Math.max(CROP_SCALE_MIN, localCrop.value.scale);
   localCrop.value = {
     ...localCrop.value,
     x: clamp(dragStart.cx - (e.clientX - dragStart.x) / (sw * k), 0, 1),
@@ -191,7 +193,7 @@ function onWheel(e: WheelEvent) {
     wheelTimer = window.setTimeout(() => { if (ov.value && localPlacement.value) void store.overlaySetPlacement(ov.value.clip.id, { ...localPlacement.value }); }, 200);
     return;
   }
-  localCrop.value = { ...localCrop.value, scale: clamp(localCrop.value.scale * (e.deltaY < 0 ? 1.05 : 0.95), 1, 4) };
+  localCrop.value = { ...localCrop.value, scale: clamp(localCrop.value.scale * (e.deltaY < 0 ? 1.05 : 0.95), CROP_SCALE_MIN, CROP_SCALE_MAX) };
   window.clearTimeout(wheelTimer);
   wheelTimer = window.setTimeout(() => void store.setCrop({ ...localCrop.value }), 200);
 }
@@ -236,6 +238,16 @@ function syncAudio() {
 }
 
 let stillClock = { at: 0, playhead: 0 };
+/** Looping: once the playhead reaches the range end, jump back to its start. */
+function wrapLoop(t: number): boolean {
+  const r = store.loopRange;
+  if (!r || t < r.end) return false;
+  stillClock = { at: 0, playhead: 0 };
+  store.playhead = r.start;
+  syncSeek();
+  raf = requestAnimationFrame(tick);
+  return true;
+}
 function tick() {
   const v = video.value, c = cur.value;
   if (!c || !store.playing) return;
@@ -244,6 +256,7 @@ function tick() {
     const now = performance.now();
     if (stillClock.at === 0) stillClock = { at: now, playhead: store.playhead };
     const t = stillClock.playhead + (now - stillClock.at);
+    if (wrapLoop(t)) return;
     const end = c.clip.timeline_start + clipDuration(c.clip);
     if (t >= end) {
       stillClock = { at: 0, playhead: 0 };
@@ -260,9 +273,11 @@ function tick() {
   }
   stillClock = { at: 0, playhead: 0 };
   const srcMs = v.currentTime * 1000;
+  if (wrapLoop(c.clip.timeline_start + Math.max(0, srcMs - c.clip.source_start))) return;
   if (srcMs >= c.clip.source_end - 20 || v.ended) {
     const next = store.clips[c.index + 1];
     if (next) { store.playhead = next.timeline_start; }
+    else if (store.loopRange) { store.playhead = store.loopRange.start; }
     else { store.playing = false; store.playhead = Math.max(store.duration - 1, 0); return; }
   } else {
     store.playhead = c.clip.timeline_start + Math.max(0, srcMs - c.clip.source_start);
@@ -275,7 +290,9 @@ function tick() {
 watch(() => store.playing, async (p) => {
   const v = video.value;
   if (p) {
-    if (store.playhead >= store.duration - 1) store.playhead = 0;
+    const r = store.loopRange;
+    if (r && (store.playhead < r.start || store.playhead >= r.end)) store.playhead = r.start;
+    else if (store.playhead >= store.duration - 1) store.playhead = 0;
     stillClock = { at: 0, playhead: 0 };
     syncSeek();
     if (v && !curStill.value) await v.play().catch(() => {});
