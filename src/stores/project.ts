@@ -74,6 +74,9 @@ export const useProjectStore = defineStore("project", () => {
   /** Splitters: the library column's width and the Pinned loops drawer's height, both remembered. */
   const libraryWidth = ref(Number(readLocal("forgevideo.libraryWidth", "288")) || 288);
   const loopsHeight = ref(Number(readLocal("forgevideo.loopsHeight", "120")) || 120);
+  /** Width of the right column (Inspector / AI panel): the Output drawer the user resizes. */
+  const inspectorWidth = ref(Number(readLocal("forgevideo.inspectorWidth", "288")) || 288);
+  watch(inspectorWidth, (v) => writeLocal("forgevideo.inspectorWidth", String(v)));
   watch(libraryWidth, (v) => writeLocal("forgevideo.libraryWidth", String(v)));
   watch(loopsHeight, (v) => writeLocal("forgevideo.loopsHeight", String(v)));
   /** Bumped whenever a loop is pinned or picked, so the timeline scrolls to show the range. */
@@ -210,7 +213,20 @@ export const useProjectStore = defineStore("project", () => {
     return p.audio_tracks.some((t) => t.id === s.trackId && t.clips.some((c) => c.id === s.id));
   }
 
-  function apply(p: Project, markDirty = true) {
+  /** Undo history: snapshots of the project before each edit (session-only, newest last). */
+  const undoStack = ref<Project[]>([]);
+  const redoStack = ref<Project[]>([]);
+  const UNDO_LIMIT = 100;
+  const canUndo = computed(() => undoStack.value.length > 0);
+  const canRedo = computed(() => redoStack.value.length > 0);
+
+  function apply(p: Project, markDirty = true, history = true) {
+    if (!markDirty) { undoStack.value = []; redoStack.value = []; }
+    else if (history && project.value) {
+      undoStack.value.push(project.value);
+      if (undoStack.value.length > UNDO_LIMIT) undoStack.value.shift();
+      redoStack.value = [];
+    }
     project.value = p;
     if (markDirty) dirty.value = true;
     if (!stillSelected(p, selected.value)) selected.value = null;
@@ -283,6 +299,20 @@ export const useProjectStore = defineStore("project", () => {
     p.audio_tracks.forEach((t) => t.clips.forEach((c) => ensureMediaCaches(c.source, c.media)));
     p.pool.forEach((i) => ensureMediaCaches(i.path, i.media));
   }
+
+  /** ⌘Z / ⇧⌘Z: hand the previous (next) snapshot back to Rust, which relayouts and keeps it. */
+  async function step(from: typeof undoStack, to: typeof undoStack, label: string) {
+    const target = from.value[from.value.length - 1]; if (!target || !project.value) return;
+    const current = project.value;
+    const p = await run(label, () => api.projectRestore(target));
+    if (!p) return;
+    from.value.pop();
+    to.value.push(current);
+    playing.value = false;
+    apply(p, true, false); cacheAll(p);
+  }
+  const undo = () => step(undoStack, redoStack, "undo");
+  const redo = () => step(redoStack, undoStack, "redo");
 
   /** Apply a project-returning command; returns whether it succeeded. */
   async function edit(label: string, fn: () => Promise<Project>): Promise<boolean> {
@@ -366,7 +396,7 @@ export const useProjectStore = defineStore("project", () => {
     async deleteHighlight(id: string) { await edit("highlight", () => api.highlightDelete(id)); },
 
     project, clips, overlays, texts, audioTracks, pool, duration, selected, selectedAll, selectedClipId, selectedClip, selectedIndex, selectedOverlay, selectedText, selectedAudio,
-    playhead, playing, dirty, error, thumbs, waveforms, busy, current, currentOverlays, currentTexts, fonts, overlayLayers, layerAudio, activeAudioClips, poolDrag, poolView, timelineHeight, notice, notify,
+    playhead, playing, dirty, canUndo, canRedo, undo, redo, error, thumbs, waveforms, busy, current, currentOverlays, currentTexts, fonts, overlayLayers, layerAudio, activeAudioClips, poolDrag, poolView, timelineHeight, notice, notify,
 
     /** Launch: reopen the last project when it still opens, otherwise the fresh one Rust started with. */
     async load() {
@@ -549,7 +579,7 @@ export const useProjectStore = defineStore("project", () => {
     seek,
 
     // ---- range & pinned loops ----
-    range, loopOn, activeLoopId, loops, activeLoop, loopRange, loopsOpen, exportOpen, aiOpen, libraryWidth, loopsHeight, revealRange, textLayers,
+    range, loopOn, activeLoopId, loops, activeLoop, loopRange, loopsOpen, exportOpen, aiOpen, libraryWidth, loopsHeight, inspectorWidth, revealRange, textLayers,
     /** Export short on a highlight card: select its span and open the Export dialog on it. */
     exportRange(r: Range) { playing.value = false; setRange(r); exportOpen.value = true; },
     setRange,

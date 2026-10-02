@@ -59,7 +59,7 @@ const pinned = (h: Highlight) => store.loops.some((l) => sameRange(l, rangeOf(h)
 </script>
 
 <template>
-  <aside class="w-72 shrink-0 border-l border-line bg-panel overflow-y-auto text-xs" data-testid="ai-panel">
+  <aside class="shrink-0 border-l border-line bg-panel overflow-y-auto text-xs" data-testid="ai-panel">
     <section class="p-3 border-b border-line">
       <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">AI · shorts from a long recording</h3>
       <p class="text-muted">Speech is transcribed on this Mac. Claude Code only reads the transcript.</p>

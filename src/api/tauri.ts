@@ -16,6 +16,7 @@ export const api = {
   projectGet: () => invoke<Project>("project_get"),
   projectNew: (name: string) => invoke<Project>("project_new", { name }),
   projectOpen: (path: string) => invoke<Project>("project_open", { path }),
+  projectRestore: (project: Project) => invoke<Project>("project_restore", { project }),
   projectSave: (path?: string) => invoke<string>("project_save", { path: path ?? null }),
   setAspect: (aspect: AspectPreset) => invoke<Project>("project_set_aspect", { aspect }),
   setCrop: (crop: Crop) => invoke<Project>("project_set_crop", { crop }),

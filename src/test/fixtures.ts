@@ -87,7 +87,7 @@ export function mockApi(p: Project) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const resolved = <T,>(v: T) => vi.fn<(...args: any[]) => Promise<T>>(() => Promise.resolve(v));
   return {
-    projectGet: resolved(p), projectNew: resolved(p), projectOpen: resolved(p), projectSave: resolved("/saved.forgevideo"),
+    projectGet: resolved(p), projectNew: resolved(p), projectOpen: resolved(p), projectRestore: resolved(p), projectSave: resolved("/saved.forgevideo"),
     setAspect: resolved(p), setCrop: resolved(p), setVideoMuted: resolved(p), setVideoVolume: resolved(p), setCaptionsEnabled: resolved(p), mediaImport: resolved(p), clipTrim: resolved(p),
     clipSplit: resolved({ project: p, new_id: "new" }), clipMerge: resolved({ project: p, new_id: "new" }), clipDelete: resolved(p), clipMove: resolved(p), clipSetFades: resolved(p),
     clipSetTransition: resolved(p), clipSetVolume: resolved(p), clipDetachAudio: resolved(p), clipRename: resolved(p), clipInsert: resolved(p),
@@ -112,7 +112,7 @@ export function mockApi(p: Project) {
 
 /** Make every project-returning command echo `p`, so edits do not wipe the store during component tests. */
 export function resolveWith(api: MockApi, p: Project) {
-  for (const k of ["projectGet", "projectNew", "projectOpen", "setAspect", "setCrop", "setVideoMuted", "setVideoVolume", "setCaptionsEnabled", "mediaImport", "clipTrim", "clipDelete", "clipMove",
+  for (const k of ["projectGet", "projectNew", "projectOpen", "projectRestore", "setAspect", "setCrop", "setVideoMuted", "setVideoVolume", "setCaptionsEnabled", "mediaImport", "clipTrim", "clipDelete", "clipMove",
     "clipSetFades", "clipSetTransition", "clipSetVolume", "clipDetachAudio", "clipRename", "clipInsert", "poolAdd", "poolRemove",
     "overlayAdd", "overlayMove", "overlayLayerAdd", "overlayLayerRemove", "overlayTrim", "overlayDelete", "overlaySetFades", "overlaySetAudio", "overlaySetOpacity", "overlayLayerSetAudio", "overlaySetPlacement",
     "audioTrackAdd", "audioTrackUpdate", "audioTrackRemove", "audioClipAdd", "audioClipMove", "audioClipTrim", "audioClipDelete", "audioClipSet",

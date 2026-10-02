@@ -40,6 +40,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::project_get,
             commands::project_new,
+            commands::project_restore,
             commands::project_open,
             commands::project_save,
             commands::project_set_aspect,

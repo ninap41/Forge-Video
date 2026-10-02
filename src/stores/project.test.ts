@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { audioClip, audioTrack, baseProject, clip, fakeSplit, media, overlay, poolItem, project, stillMedia, textClip, type MockApi, loopFx } from "../test/fixtures";
+import type { Project } from "../types/project";
 
 vi.mock("../api/tauri", async () => {
   const f = await import("../test/fixtures");
@@ -99,6 +100,48 @@ describe("derived state", () => {
     expect(api.cacheWaveform).toHaveBeenCalledTimes(2);
     expect(s.thumbs[base.clips[0].source]).toEqual({ intervalMs: 200, urls: ["asset://localhost/t/0001.jpg", "asset://localhost/t/0002.jpg"] });
     expect(s.waveforms[base.clips[0].source]).toEqual([1, 2, 3]);
+  });
+
+  it("undo restores the project before the last edit through project_restore, redo re-applies it, and loading clears the history", async () => {
+    const s = useProjectStore();
+    await s.load();
+    expect(s.canUndo).toBe(false);
+    await s.undo();
+    expect(api.projectRestore).not.toHaveBeenCalled();
+    const after1 = project([clip({ id: "a" })]);
+    api.clipDelete.mockImplementationOnce(() => Promise.resolve(after1));
+    await s.deleteClip("b");
+    const after2 = project([]);
+    api.clipDelete.mockImplementationOnce(() => Promise.resolve(after2));
+    await s.deleteClip("a");
+    expect(s.canUndo).toBe(true); expect(s.canRedo).toBe(false);
+    api.projectRestore.mockImplementation((p: Project) => Promise.resolve(p));
+    s.playing = true;
+    await s.undo();
+    expect(api.projectRestore).toHaveBeenLastCalledWith(after1);
+    expect(s.clips.map((c) => c.id)).toEqual(["a"]);
+    expect(s.playing).toBe(false);
+    expect(s.dirty).toBe(true);
+    expect(s.canRedo).toBe(true);
+    await s.undo();
+    expect(s.clips.map((c) => c.id)).toEqual(["a", "b"]);
+    expect(s.canUndo).toBe(false);
+    await s.redo();
+    expect(s.clips.map((c) => c.id)).toEqual(["a"]);
+    await s.redo();
+    expect(s.clips).toEqual([]);
+    expect(s.canRedo).toBe(false);
+    await s.undo();
+    api.clipDelete.mockImplementationOnce(() => Promise.resolve(project([])));
+    await s.deleteClip("a");
+    expect(s.canRedo).toBe(false);
+    api.projectRestore.mockImplementationOnce(() => Promise.reject("boom"));
+    await s.undo();
+    expect(s.error).toContain("boom");
+    expect(s.clips).toEqual([]);
+    expect(s.canUndo).toBe(true);
+    await s.newProject();
+    expect(s.canUndo).toBe(false); expect(s.canRedo).toBe(false);
   });
 
   it("does not request a waveform for silent clips and does not refetch cached media", async () => {

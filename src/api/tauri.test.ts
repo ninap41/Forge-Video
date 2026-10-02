@@ -73,7 +73,7 @@ describe("api → invoke mapping", () => {
   });
 
   it("covers every remaining command once", async () => {
-    await api.projectGet(); await api.projectOpen("/p"); await api.setAspect("Square1x1"); await api.setCrop({ scale: 2, x: 0, y: 1 }); await api.setVideoMuted(true); await api.setVideoVolume(0.5); await api.setCaptionsEnabled(false);
+    await api.projectGet(); await api.projectOpen("/p"); await api.projectRestore({ name: "P" } as never); await api.setAspect("Square1x1"); await api.setCrop({ scale: 2, x: 0, y: 1 }); await api.setVideoMuted(true); await api.setVideoVolume(0.5); await api.setCaptionsEnabled(false);
     await api.mediaImport("/v.mp4"); await api.clipDelete("id"); await api.clipInsert("/v.mp4", 0);
     await api.poolAdd("/a"); await api.poolRemove("p");
     await api.overlayMove("o", 1, 0); await api.overlayLayerAdd(); await api.overlayLayerRemove(1); await api.overlayTrim("o", 0, 1); await api.overlaySplit("o", 1); await api.overlayDelete("o"); await api.overlaySetFades("o", 1, 2); await api.overlaySetAudio("o", 0.5, true); await api.overlaySetOpacity("o", 0.5); await api.overlayLayerSetAudio(1, true, 0.5);
@@ -82,7 +82,7 @@ describe("api → invoke mapping", () => {
     await api.cacheWaveform("/v.mp4"); await api.exportPlan({ destination: "/o", quality: "Draft", audio_only: true, range: null });
     await api.textAdd("Hi", 1.4, 1); await api.textMove("t", 2, 0); await api.textLayerAdd(); await api.textLayerRemove(1); await api.loopAdd("Hook", 1000.4, 4000); await api.loopRemove("l"); await api.loopRename("l", "Intro");
     expect(invoke.mock.calls.map((c) => c[0])).toEqual([
-      "project_get", "project_open", "project_set_aspect", "project_set_crop", "project_set_video_muted", "project_set_video_volume", "project_set_captions_enabled", "media_import", "clip_delete", "clip_insert",
+      "project_get", "project_open", "project_restore", "project_set_aspect", "project_set_crop", "project_set_video_muted", "project_set_video_volume", "project_set_captions_enabled", "media_import", "clip_delete", "clip_insert",
       "pool_add", "pool_remove",
       "overlay_move", "overlay_layer_add", "overlay_layer_remove", "overlay_trim", "overlay_split", "overlay_delete", "overlay_set_fades", "overlay_set_audio", "overlay_set_opacity", "overlay_layer_set_audio",
       "audio_track_add", "audio_track_update", "audio_track_remove",

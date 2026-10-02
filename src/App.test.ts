@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTitle }
 
 import App from "./App.vue";
 import { useProjectStore } from "./stores/project";
-import { SHORTCUTS } from "./components/HelpDialog.vue";
+import { GUIDE, SHORTCUTS } from "./components/HelpDialog.vue";
 import { WELCOME_KEY } from "./components/WelcomeDialog.vue";
 import ClipBlock from "./components/ClipBlock.vue";
 
@@ -48,7 +48,7 @@ beforeEach(() => {
   setTitle.mockClear(); unlistenDrop.mockClear(); dropHandler = undefined;
   localStorage.setItem(WELCOME_KEY, "1"); // every suite but "first launch" is past the welcome dialog
   localStorage.removeItem("forgevideo.lastProject");
-  localStorage.removeItem("forgevideo.libraryWidth"); localStorage.removeItem("forgevideo.loopsHeight");
+  localStorage.removeItem("forgevideo.libraryWidth"); localStorage.removeItem("forgevideo.loopsHeight"); localStorage.removeItem("forgevideo.inspectorWidth");
 });
 
 describe("App shell", () => {
@@ -197,6 +197,19 @@ describe("App shell", () => {
     await flush();
     expect(dialog.save).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "Test.forgevideo" }));
     expect(api.projectSave).toHaveBeenLastCalledWith("/p/Test.forgevideo");
+  });
+
+  it("⌘Z undoes and ⇧⌘Z redoes (Ctrl works too)", async () => {
+    const { store } = await setup();
+    const spyUndo = vi.spyOn(store, "undo").mockResolvedValue();
+    const spyRedo = vi.spyOn(store, "redo").mockResolvedValue();
+    key({ key: "z", metaKey: true });
+    expect(spyUndo).toHaveBeenCalledTimes(1);
+    key({ key: "z", ctrlKey: true });
+    expect(spyUndo).toHaveBeenCalledTimes(2);
+    key({ key: "Z", metaKey: true, shiftKey: true });
+    expect(spyRedo).toHaveBeenCalledTimes(1);
+    expect(spyUndo).toHaveBeenCalledTimes(2);
   });
 
   it("opens the export dialog from the button and ⌘E", async () => {
@@ -370,17 +383,29 @@ describe("keyboard shortcuts", () => {
 });
 
 describe("help dialog", () => {
-  it("opens from the toolbar ? button and lists every shortcut", async () => {
+  it("opens from the toolbar ? button on the shortcuts section and lists every shortcut", async () => {
     const { w } = await setup();
     expect(w.find("[role=dialog]").exists()).toBe(false);
     await w.find("button[aria-label='Help: keyboard shortcuts']").trigger("click");
     const dlg = w.find("[role=dialog]");
     expect(dlg.exists()).toBe(true);
-    expect(dlg.find("h2").text()).toBe("Keyboard shortcuts");
+    expect(dlg.find("h2").text()).toBe("Help");
+    expect(dlg.find("[data-testid=help-body] h3").text()).toBe("Keyboard & mouse");
     for (const s of SHORTCUTS) { expect(dlg.text()).toContain(s.keys); expect(dlg.text()).toContain(s.action); }
     expect(dlg.text()).toContain("Trim in / out point");
     await dlg.find("button[aria-label=Close]").trigger("click");
     expect(w.find("[role=dialog]").exists()).toBe(false);
+  });
+
+  it("the Help item in the top bar opens the guide on its first section with every section in the nav", async () => {
+    const { w } = await setup();
+    await w.find("[data-testid=help-menu]").trigger("click");
+    const dlg = w.find("[role=dialog]");
+    expect(dlg.find("[data-testid=help-body] h3").text()).toBe(GUIDE[0]!.title);
+    expect(dlg.findAll("[data-testid=help-nav]").map((b) => b.text())).toEqual(GUIDE.map((g) => g.title));
+    await dlg.findAll("[data-testid=help-nav]").find((b) => b.text() === "Export")!.trigger("click");
+    expect(dlg.find("[data-testid=help-body] h3").text()).toBe("Export");
+    expect(dlg.text()).toContain("Whole timeline");
   });
 
   it("toggles with ? and closes with Escape; other shortcuts are ignored while open", async () => {
@@ -474,6 +499,26 @@ describe("AI mode", () => {
     store.loopsOpen = false;
     await flush();
     expect(w.find("[data-testid=loops-resize]").exists()).toBe(false);
+  });
+
+  it("the side panel (Inspector or AI panel) resizes by dragging its left edge, within limits, and remembers it", async () => {
+    const { w, store } = await setup();
+    expect((w.find("[data-testid=inspector]").element as HTMLElement).style.width).toBe("288px");
+    const bar = w.find("[data-testid=inspector-resize]");
+    (bar.element as HTMLElement).setPointerCapture = () => {};
+    await bar.trigger("pointerdown", { clientX: 700, pointerId: 1 });
+    await bar.trigger("pointermove", { clientX: 600 });
+    expect(store.inspectorWidth).toBe(388);
+    await bar.trigger("pointermove", { clientX: 900 });
+    expect(store.inspectorWidth).toBe(240);
+    await bar.trigger("pointerup");
+    await bar.trigger("pointermove", { clientX: 100 });
+    expect(store.inspectorWidth).toBe(240);
+    await flush();
+    expect(localStorage.getItem("forgevideo.inspectorWidth")).toBe("240");
+    store.aiOpen = true;
+    await flush();
+    expect((w.find("[data-testid=ai-panel]").element as HTMLElement).style.width).toBe("240px");
   });
 });
 

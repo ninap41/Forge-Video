@@ -35,6 +35,16 @@ pub fn project_new(state: S, name: String) -> Project {
     snapshot(&state)
 }
 
+/// Undo / redo: the UI hands back an earlier snapshot of the project it was given. Relayout keeps the
+/// invariants even if the snapshot came from an older build; the save path is untouched.
+#[tauri::command]
+pub fn project_restore(state: S, project: Project) -> Project {
+    let mut p = project;
+    timeline::relayout(&mut p);
+    *state.project.lock().unwrap() = p;
+    snapshot(&state)
+}
+
 /// Open a project and re-probe its pool so files saved with an older probe (e.g. an mp3 whose cover
 /// art made it a "still") come back with the right kind. Best effort: unreadable files keep their info.
 #[tauri::command]
@@ -815,6 +825,15 @@ mod tests {
         assert_eq!(project_set_crop(st.clone(), Crop { scale: 0.5, x: 0.3, y: 0.7 }).crop.scale, 0.5);
         assert!(project_set_video_muted(st.clone(), true).video_muted);
         assert!(project_get(st.clone()).video_muted, "video mute persisted");
+        let before = project_get(st.clone());
+        let mut edited = before.clone();
+        edited.name = "Later".into();
+        edited.crop.scale = 2.0;
+        assert_eq!(project_restore(st.clone(), edited).name, "Later");
+        assert_eq!(project_get(st.clone()).crop.scale, 2.0);
+        let restored = project_restore(st.clone(), before.clone());
+        assert_eq!(restored, before, "restore puts the snapshot back untouched");
+        assert_eq!(project_get(st.clone()).name, "Reel");
         assert!(!project_set_video_muted(st.clone(), false).video_muted);
         assert_eq!(project_set_video_volume(st.clone(), 0.4).video_volume, 0.4);
         assert_eq!(project_set_video_volume(st.clone(), 7.0).video_volume, 1.0, "fader clamps to 1");

@@ -262,11 +262,12 @@ npm test && npm run build && (cd src-tauri && cargo test)
 
 ## Keys
 
-Press **?** or click the **?** button at the right of the toolbar to see this list inside the app.
+Press **?** or click the **?** button at the right of the toolbar to see this list inside the app. **Help** in the top bar opens the full in-app guide, with a section for every part of the editor.
 
 | Keys | Action |
 |---|---|
 | Space | Play / pause (a loaded loop restarts from its beginning) |
+| ⌘ Z / ⇧ ⌘ Z | Undo / redo the last edit |
 | ⌘ T | Split selected clip at playhead |
 | ⌘ J | Join (merge) the selected clips (⇧-click to select several) |
 | ⌫ / Delete | Delete selected clip |

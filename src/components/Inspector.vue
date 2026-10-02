@@ -100,7 +100,7 @@ const cropScale = computed(() => zoomToScale(cropZoom.value));
 </script>
 
 <template>
-  <aside class="w-72 shrink-0 border-l border-line bg-panel overflow-y-auto text-xs">
+  <aside class="shrink-0 border-l border-line bg-panel overflow-y-auto text-xs" data-testid="inspector">
     <!-- Output -->
     <section class="p-3 border-b border-line">
       <h3 class="uppercase tracking-wide text-[10px] text-muted mb-2">Output</h3>
