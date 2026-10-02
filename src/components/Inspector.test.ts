@@ -302,7 +302,10 @@ describe("Inspector · overlay and audio clips", () => {
     const input = w.find("[data-testid=cue-edit]");
     expect((input.element as HTMLInputElement).value).toBe("So here is the thing");
     await input.setValue("So here's the thing");
-    await input.trigger("keydown", { key: "Enter" });
+    store.seek(3000); // a seek while typing re-renders the list; the draft must survive it
+    await w.vm.$nextTick();
+    expect((w.find("[data-testid=cue-edit]").element as HTMLInputElement).value).toBe("So here's the thing");
+    await w.find("[data-testid=cue-edit]").trigger("keydown", { key: "Enter" });
     expect(api.cueSetText).toHaveBeenCalledWith("c1", "So here's the thing");
     expect(w.find("[data-testid=cue-edit]").exists()).toBe(false);
     // Escape cancels without a call; an unchanged blur is a no-op; blank removes

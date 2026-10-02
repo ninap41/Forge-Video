@@ -80,7 +80,7 @@ describe("api → invoke mapping", () => {
     await api.audioTrackAdd("SFX"); await api.audioTrackUpdate("t", "x", true, 0.5); await api.audioTrackRemove("t");
     await api.audioClipMove("c", "t", 1); await api.audioClipTrim("c", 0, 1); await api.audioClipSplit("c", 1); await api.audioClipDelete("c");
     await api.cacheWaveform("/v.mp4"); await api.exportPlan({ destination: "/o", quality: "Draft", audio_only: true, range: null });
-    await api.textAdd("Hi", 1.4, 1); await api.textMove("t", 2, 0); await api.textLayerAdd(); await api.textLayerRemove(1); await api.loopAdd("Hook", 1000.4, 4000); await api.loopRemove("l");
+    await api.textAdd("Hi", 1.4, 1); await api.textMove("t", 2, 0); await api.textLayerAdd(); await api.textLayerRemove(1); await api.loopAdd("Hook", 1000.4, 4000); await api.loopRemove("l"); await api.loopRename("l", "Intro");
     expect(invoke.mock.calls.map((c) => c[0])).toEqual([
       "project_get", "project_open", "project_set_aspect", "project_set_crop", "project_set_video_muted", "project_set_video_volume", "project_set_captions_enabled", "media_import", "clip_delete", "clip_insert",
       "pool_add", "pool_remove",
@@ -88,9 +88,9 @@ describe("api → invoke mapping", () => {
       "audio_track_add", "audio_track_update", "audio_track_remove",
       "audio_clip_move", "audio_clip_trim", "audio_clip_split", "audio_clip_delete",
       "cache_waveform", "export_plan",
-      "text_add", "text_move", "text_layer_add", "text_layer_remove", "loop_add", "loop_remove",
+      "text_add", "text_move", "text_layer_add", "text_layer_remove", "loop_add", "loop_remove", "loop_rename",
     ]);
-    expect(invoke.mock.calls.slice(-6).map((c) => c[1])).toEqual([{ text: "Hi", at: 1, layer: 1 }, { id: "t", at: 2, layer: 0 }, undefined, { layer: 1 }, { name: "Hook", start: 1000, end: 4000 }, { id: "l" }]);
+    expect(invoke.mock.calls.slice(-7).map((c) => c[1])).toEqual([{ text: "Hi", at: 1, layer: 1 }, { id: "t", at: 2, layer: 0 }, undefined, { layer: 1 }, { name: "Hook", start: 1000, end: 4000 }, { id: "l" }, { id: "l", name: "Intro" }]);
   });
 
   it("maps the AI mode commands", async () => {

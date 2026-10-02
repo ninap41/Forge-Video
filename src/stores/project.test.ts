@@ -551,6 +551,15 @@ describe("mutations", () => {
     expect(s.activeLoop).toEqual(l);
     s.setRange({ start: 0, end: 1000 });
     expect(s.activeLoopId).toBeNull();
+    // the same range again is refused with a banner and just selects the existing loop
+    api.loopAdd.mockClear();
+    await s.loopAdd("again", { start: 2000, end: 4000 });
+    expect(api.loopAdd).not.toHaveBeenCalled();
+    expect([s.notice, s.activeLoopId]).toEqual(["Already pinned as “Hook”", "l1"]);
+    api.loopRename.mockImplementationOnce(() => Promise.resolve({ ...p, loops: [{ ...l, name: "Intro" }] }));
+    await s.loopRename("l1", "Intro");
+    expect(api.loopRename).toHaveBeenCalledWith("l1", "Intro");
+    expect(s.activeLoop?.name).toBe("Intro");
     s.selectLoop("l1");
     expect(s.range).toEqual({ start: 2000, end: 4000 });
     expect(s.activeLoopId).toBe("l1");

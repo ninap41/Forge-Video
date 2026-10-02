@@ -653,6 +653,9 @@ pub fn locate_texts(p: &Project, t: Ms) -> Vec<usize> {
 pub fn loop_add(p: &mut Project, name: &str, start: Ms, end: Ms) -> Result<Uuid> {
     let end = end.min(p.duration_ms());
     check_range(start, end)?;
+    if p.loops.iter().any(|l| l.start == start && l.end == end) {
+        return Err(Error::InvalidEdit("a loop with this range is already pinned".into()));
+    }
     let name: String = name.trim().chars().take(80).collect();
     let name = if name.is_empty() { format!("{}–{}", span_label(start), span_label(end)) } else { name };
     let id = Uuid::new_v4();
@@ -663,6 +666,15 @@ pub fn loop_add(p: &mut Project, name: &str, start: Ms, end: Ms) -> Result<Uuid>
 
 fn span_label(ms: Ms) -> String {
     format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)
+}
+
+/// Rename a pinned loop (trimmed, ≤ 80 chars; blank falls back to its span).
+pub fn loop_rename(p: &mut Project, id: Uuid, name: &str) -> Result<()> {
+    let i = p.loop_index(id).ok_or(Error::ClipNotFound(id))?;
+    let name: String = name.trim().chars().take(80).collect();
+    let l = &mut p.loops[i];
+    l.name = if name.is_empty() { format!("{}–{}", span_label(l.start), span_label(l.end)) } else { name };
+    Ok(())
 }
 
 pub fn loop_remove(p: &mut Project, id: Uuid) -> Result<()> {
@@ -1010,6 +1022,12 @@ mod track_tests {
         p.clips[0].source_end = 9500;
         relayout(&mut p);
         assert_eq!(p.loops.iter().find(|l| l.id == c).unwrap().end, 9500, "clamped, still long enough");
+        assert!(matches!(loop_add(&mut p, "again", 9000, 9500), Err(Error::InvalidEdit(_))), "the same range cannot be pinned twice");
+        loop_rename(&mut p, c, "  Outro ").unwrap();
+        assert_eq!(p.loops.iter().find(|l| l.id == c).unwrap().name, "Outro");
+        loop_rename(&mut p, c, "").unwrap();
+        assert_eq!(p.loops.iter().find(|l| l.id == c).unwrap().name, "0:09–0:09", "blank falls back to the span");
+        assert!(loop_rename(&mut p, b, "x").is_err());
         loop_remove(&mut p, a).unwrap();
         assert!(loop_remove(&mut p, b).is_err());
         assert_eq!(p.loops.len(), 1);

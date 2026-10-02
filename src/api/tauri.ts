@@ -71,6 +71,7 @@ export const api = {
 
   loopAdd: (name: string, start: Ms, end: Ms) => invoke<Project>("loop_add", { name, start: ms(start), end: ms(end) }),
   loopRemove: (id: string) => invoke<Project>("loop_remove", { id }),
+  loopRename: (id: string, name: string) => invoke<Project>("loop_rename", { id, name }),
 
   audioTrackAdd: (label: string) => invoke<Project>("audio_track_add", { label }),
   audioTrackUpdate: (id: string, label: string, muted: boolean, volume: number) => invoke<Project>("audio_track_update", { id, label, muted, volume }),

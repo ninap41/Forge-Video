@@ -1,10 +1,19 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import { useProjectStore } from "../stores/project";
 import type { Loop } from "../types/project";
 import { sameRange } from "../types/project";
 import { fmtMs } from "../utils/time";
 
 const store = useProjectStore();
+/** Inline rename (double-click the name): Enter / blur commit, Escape cancels, blank = the span. */
+const renaming = ref<{ id: string; name: string } | null>(null);
+function commitRename(l: Loop) {
+  const r = renaming.value; if (r?.id !== l.id) return;
+  renaming.value = null;
+  if (r.name.trim() !== l.name) void store.loopRename(l.id, r.name);
+}
+const vFocus = { mounted: (el: HTMLInputElement) => { el.focus(); el.select(); } };
 const secs = (ms: number) => `${(ms / 1000).toFixed(ms % 1000 ? 1 : 0)} s`;
 /** ❚❚ while this loop is the one playing on repeat. */
 const looping = (l: Loop) => store.playing && store.loopOn && sameRange(store.range, l);
@@ -30,7 +39,15 @@ const looping = (l: Loop) => store.playing && store.loopOn && sameRange(store.ra
         :class="store.activeLoopId === l.id ? 'bg-yellow-400/10 text-yellow-400' : 'text-fg'"
       >
         <button class="w-5 text-center hover:text-fg" :title="looping(l) ? 'Pause' : 'Play this loop on repeat'" :aria-label="`${looping(l) ? 'Pause' : 'Play'} ${l.name}`" data-testid="loop-play" @click="store.playRange(l, l.id)">{{ looping(l) ? '❚❚' : '▶' }}</button>
-        <button class="flex-1 min-w-0 text-left truncate hover:underline" :title="`Show ${l.name} on the timeline`" data-testid="loop-name" @click="store.selectLoop(l.id)">{{ l.name }}</button>
+        <input
+          v-if="renaming?.id === l.id" v-model="renaming.name" v-focus data-testid="loop-rename" aria-label="Loop name" maxlength="80"
+          class="flex-1 min-w-0 bg-panel-2 border border-accent rounded px-1 text-fg"
+          @keydown.stop @keydown.enter="commitRename(l)" @keydown.escape="renaming = null" @blur="commitRename(l)"
+        />
+        <button
+          v-else class="flex-1 min-w-0 text-left truncate hover:underline" :title="`Show ${l.name} on the timeline · double-click to rename`" data-testid="loop-name"
+          @click="store.selectLoop(l.id)" @dblclick="renaming = { id: l.id, name: l.name }"
+        >{{ l.name }}</button>
         <span class="font-mono text-muted">{{ fmtMs(l.start, false) }}–{{ fmtMs(l.end, false) }} · {{ secs(l.end - l.start) }}</span>
         <button class="rounded border border-line px-1.5 hover:text-fg" title="Export just this loop" data-testid="loop-export" @click="store.exportLoop(l.id)">Export</button>
         <button class="w-4 text-center text-muted hover:text-danger" title="Unpin" :aria-label="`Unpin ${l.name}`" data-testid="loop-unpin" @click="store.loopRemove(l.id)">✕</button>

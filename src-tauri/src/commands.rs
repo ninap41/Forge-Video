@@ -297,6 +297,12 @@ pub fn loop_add(state: S, name: String, start: Ms, end: Ms) -> Result<Project> {
 }
 
 #[tauri::command]
+pub fn loop_rename(state: S, id: Uuid, name: String) -> Result<Project> {
+    with_project(&state, |p| timeline::loop_rename(p, id, &name))?;
+    Ok(snapshot(&state))
+}
+
+#[tauri::command]
 pub fn loop_remove(state: S, id: Uuid) -> Result<Project> {
     with_project(&state, |p| timeline::loop_remove(p, id))?;
     Ok(snapshot(&state))
@@ -1054,6 +1060,8 @@ mod tests {
         let p = loop_add(st.clone(), "Hook".into(), 500, 2500).unwrap();
         assert_eq!((p.loops.len(), p.loops[0].name.as_str()), (1, "Hook"));
         assert!(loop_add(st.clone(), "".into(), 100, 150).is_err());
+        assert!(loop_add(st.clone(), "dup".into(), 500, 2500).is_err(), "duplicate range");
+        assert_eq!(loop_rename(st.clone(), p.loops[0].id, "Intro".into()).unwrap().loops[0].name, "Intro");
         let p = loop_remove(st.clone(), p.loops[0].id).unwrap();
         assert!(p.loops.is_empty());
         assert!(loop_remove(st.clone(), Uuid::new_v4()).is_err());

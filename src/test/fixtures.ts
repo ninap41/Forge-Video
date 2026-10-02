@@ -94,7 +94,7 @@ export function mockApi(p: Project) {
     poolAdd: resolved(p), poolRemove: resolved(p),
     overlayAdd: resolved(p), overlayMove: resolved(p), overlayLayerAdd: resolved(p), overlayLayerRemove: resolved(p), overlayTrim: resolved(p), overlaySplit: resolved({ project: p, new_id: "new" }),
     overlayDelete: resolved(p), overlaySetFades: resolved(p), overlaySetAudio: resolved(p), overlaySetOpacity: resolved(p), overlayLayerSetAudio: resolved(p), overlaySetPlacement: resolved(p),
-    textAdd: resolved(p), textMove: resolved(p), textLayerAdd: resolved(p), textLayerRemove: resolved(p), loopAdd: resolved(p), loopRemove: resolved(p), textTrim: resolved(p), textSplit: resolved({ project: p, new_id: "new" }), textDelete: resolved(p),
+    textAdd: resolved(p), textMove: resolved(p), textLayerAdd: resolved(p), textLayerRemove: resolved(p), loopAdd: resolved(p), loopRemove: resolved(p), loopRename: resolved(p), textTrim: resolved(p), textSplit: resolved({ project: p, new_id: "new" }), textDelete: resolved(p),
     textSetFades: resolved(p), textSetPosition: resolved(p), textSetStyle: resolved(p), systemFonts: resolved(["Quicksand", "Orbit", "Helvetica Neue", "Impact"]),
     audioTrackAdd: resolved(p), audioTrackUpdate: resolved(p), audioTrackRemove: resolved(p),
     audioClipAdd: resolved(p), audioClipMove: resolved(p), audioClipTrim: resolved(p), audioClipSplit: resolved({ project: p, new_id: "new" }),
@@ -116,7 +116,7 @@ export function resolveWith(api: MockApi, p: Project) {
     "clipSetFades", "clipSetTransition", "clipSetVolume", "clipDetachAudio", "clipRename", "clipInsert", "poolAdd", "poolRemove",
     "overlayAdd", "overlayMove", "overlayLayerAdd", "overlayLayerRemove", "overlayTrim", "overlayDelete", "overlaySetFades", "overlaySetAudio", "overlaySetOpacity", "overlayLayerSetAudio", "overlaySetPlacement",
     "audioTrackAdd", "audioTrackUpdate", "audioTrackRemove", "audioClipAdd", "audioClipMove", "audioClipTrim", "audioClipDelete", "audioClipSet",
-    "textAdd", "textMove", "textLayerAdd", "textLayerRemove", "loopAdd", "loopRemove", "textTrim", "textDelete", "textSetFades", "textSetPosition", "textSetStyle",
+    "textAdd", "textMove", "textLayerAdd", "textLayerRemove", "loopAdd", "loopRemove", "loopRename", "textTrim", "textDelete", "textSetFades", "textSetPosition", "textSetStyle",
     "cueSetText", "highlightDelete"] as const) {
     api[k].mockImplementation(() => Promise.resolve(p) as never);
   }

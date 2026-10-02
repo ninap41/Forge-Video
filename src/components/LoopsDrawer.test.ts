@@ -66,6 +66,36 @@ describe("LoopsDrawer", () => {
     expect(w.text()).toContain("Pinned loops");
   });
 
+  it("double-click renames a loop; Enter / blur commit, Escape cancels, unchanged is a no-op", async () => {
+    const l = loopFx({ id: "l1", name: "Hook" });
+    const { w } = setup(project([clip({ id: "a" })], { loops: [l] }));
+    await w.find("[data-testid=loop-name]").trigger("dblclick");
+    const input = w.find("[data-testid=loop-rename]");
+    expect((input.element as HTMLInputElement).value).toBe("Hook");
+    await input.setValue("Cold open");
+    await input.trigger("keydown", { key: "Enter" });
+    expect(api.loopRename).toHaveBeenCalledWith("l1", "Cold open");
+    expect(w.find("[data-testid=loop-rename]").exists()).toBe(false);
+    await w.find("[data-testid=loop-name]").trigger("dblclick");
+    await w.find("[data-testid=loop-rename]").setValue("discarded");
+    await w.find("[data-testid=loop-rename]").trigger("keydown", { key: "Escape" });
+    expect(api.loopRename).toHaveBeenCalledTimes(1);
+    await w.find("[data-testid=loop-name]").trigger("dblclick");
+    await w.find("[data-testid=loop-rename]").trigger("blur");
+    expect(api.loopRename).toHaveBeenCalledTimes(1);
+  });
+
+  it("pinning a range that is already pinned shows a banner instead of a second loop", async () => {
+    const l = loopFx({ id: "l1", name: "Hook", start: 1000, end: 4000 });
+    const { store, w } = setup(project([clip({ id: "a" })], { loops: [l] }));
+    store.setRange({ start: 1000, end: 4000 });
+    await w.vm.$nextTick();
+    await w.find("[data-testid=pin-range]").trigger("click");
+    expect(api.loopAdd).not.toHaveBeenCalled();
+    expect(store.notice).toBe("Already pinned as “Hook”");
+    expect(store.activeLoopId).toBe("l1");
+  });
+
   it("shows a hint when nothing is pinned", () => {
     const { w } = setup();
     expect(w.text()).toContain("Drag on the ruler to select a range, then Pin");

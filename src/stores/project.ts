@@ -568,6 +568,8 @@ export const useProjectStore = defineStore("project", () => {
     /** Pin `r` (default: the current range) under `name`; the new loop becomes the active one. */
     async loopAdd(name: string, r: Range | null = range.value) {
       if (!r) return;
+      const dup = loops.value.find((l) => sameRange(l, r));
+      if (dup) { notify(`Already pinned as “${dup.name}”`); selectLoop(dup.id); return; }
       const before = new Set(loops.value.map((l) => l.id));
       if (await edit("loop", () => api.loopAdd(name, r.start, r.end))) {
         const l = loops.value.find((l) => !before.has(l.id));
@@ -575,6 +577,7 @@ export const useProjectStore = defineStore("project", () => {
       }
     },
     async loopRemove(id: string) { await edit("loop", () => api.loopRemove(id)); },
+    async loopRename(id: string, name: string) { await edit("loop", () => api.loopRename(id, name)); },
     /** Export in the drawer: select the loop and open the Export dialog on it. */
     exportLoop(id: string) { playing.value = false; selectLoop(id); exportOpen.value = true; },
   };

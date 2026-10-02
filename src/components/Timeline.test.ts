@@ -690,9 +690,16 @@ describe("Timeline", () => {
       const input = w.find("[data-testid=cue-text]");
       expect((input.element as HTMLInputElement).value).toBe("So here is the thing");
       await input.setValue("  So here's the thing ");
-      await input.trigger("keydown", { key: "Enter" });
+      // clicking away re-renders the timeline (the scrub moves the playhead); the draft must survive it
+      await w.find("[data-row=video]").trigger("pointerdown", { clientX: 24 + 4000 * PX_PER_MS, pointerId: 1 });
+      expect((w.find("[data-testid=cue-text]").element as HTMLInputElement).value).toBe("  So here's the thing ");
+      await w.find("[data-testid=cue-text]").trigger("blur");
       expect(api.cueSetText).toHaveBeenCalledWith("c1", "So here's the thing");
       expect(w.find("[data-testid=cue-text]").exists()).toBe(false);
+      await first().trigger("dblclick");
+      await w.find("[data-testid=cue-text]").setValue("via Enter");
+      await w.find("[data-testid=cue-text]").trigger("keydown", { key: "Enter" });
+      expect(api.cueSetText).toHaveBeenLastCalledWith("c1", "via Enter");
 
       api.cueSetText.mockClear();
       await first().trigger("dblclick");

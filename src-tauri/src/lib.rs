@@ -85,6 +85,7 @@ pub fn run() {
             commands::text_layer_remove,
             commands::loop_add,
             commands::loop_remove,
+            commands::loop_rename,
             commands::system_fonts,
             commands::audio_track_add,
             commands::audio_track_update,

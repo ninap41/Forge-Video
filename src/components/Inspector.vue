@@ -12,11 +12,12 @@ const ov = computed(() => store.selectedOverlay);
 const au = computed(() => store.selectedAudio);
 const cap = computed(() => store.selectedCaptions);
 /** Inline caption editing in the list below; Enter / blur commit, Escape cancels, blank removes the cue. */
-const editingCue = ref<string | null>(null);
-function commitCue(id: string, before: string, e: Event) {
-  if (editingCue.value !== id) return; // Escape already closed it
+const editingCue = ref<{ id: string; text: string } | null>(null);
+function editCue(c: { id: string; text: string }) { editingCue.value = { id: c.id, text: c.text }; }
+function commitCue(id: string, before: string) {
+  const d = editingCue.value; if (d?.id !== id) return; // Escape already closed it
   editingCue.value = null;
-  const text = (e.target as HTMLInputElement).value.trim();
+  const text = d.text.trim();
   if (text !== before) void store.setCueText(id, text);
 }
 const vFocus = { mounted: (el: HTMLInputElement) => { el.focus(); el.select(); } };
@@ -312,11 +313,11 @@ const cropScale = computed(() => zoomToScale(cropZoom.value));
         <li v-for="c in store.cues" :key="c.id" class="flex gap-2 px-1 py-1" :class="store.currentCue?.id === c.id ? 'bg-accent/10' : ''" data-testid="cue-row">
           <button class="font-mono text-muted shrink-0 hover:text-fg" :title="`Jump to ${fmtMs(c.start)}`" @click="store.playing = false; store.seek(c.start)">{{ fmtMs(c.start, false) }}</button>
           <input
-            v-if="editingCue === c.id" v-focus data-testid="cue-edit" aria-label="Caption text" :value="c.text"
+            v-if="editingCue?.id === c.id" v-model="editingCue.text" v-focus data-testid="cue-edit" aria-label="Caption text"
             class="flex-1 min-w-0 bg-panel-2 border border-accent rounded px-1 text-fg"
-            @keydown.stop @keydown.enter="commitCue(c.id, c.text, $event)" @keydown.escape="editingCue = null" @blur="commitCue(c.id, c.text, $event)"
+            @keydown.stop @keydown.enter="commitCue(c.id, c.text)" @keydown.escape="editingCue = null" @blur="commitCue(c.id, c.text)"
           />
-          <button v-else class="flex-1 min-w-0 text-left truncate hover:text-accent" :title="c.text" @click="editingCue = c.id">{{ c.text }}</button>
+          <button v-else class="flex-1 min-w-0 text-left truncate hover:text-accent" :title="c.text" @click="editCue(c)">{{ c.text }}</button>
         </li>
       </ol>
     </section>

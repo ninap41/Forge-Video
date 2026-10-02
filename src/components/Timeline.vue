@@ -413,11 +413,13 @@ const videoTop = computed(() => overlaysTop.value + overlaysH.value);
 const captionTop = computed(() => videoTop.value + ROW.video + ROW.gap);
 const hasCaptions = computed(() => store.cues.length > 0);
 const audioTop = computed(() => captionTop.value + (hasCaptions.value ? ROW.caption + ROW.gap : 0));
-const editingCue = ref<string | null>(null);
-function commitCue(id: string, before: string, e: Event) {
-  if (editingCue.value !== id) return; // Escape already closed it
+/** The caption being corrected, with its draft text: a re-render (scrub, seek) must never reset what was typed. */
+const editingCue = ref<{ id: string; text: string } | null>(null);
+function editCue(c: { id: string; text: string }) { editingCue.value = { id: c.id, text: c.text }; }
+function commitCue(id: string, before: string) {
+  const d = editingCue.value; if (d?.id !== id) return; // Escape already closed it
   editingCue.value = null;
-  const text = (e.target as HTMLInputElement).value.trim();
+  const text = d.text.trim();
   if (text !== before) void store.setCueText(id, text);
 }
 const tracksHeight = computed(() => audioTop.value + store.audioTracks.length * (ROW.audio + ROW.gap) + 24);
@@ -596,11 +598,11 @@ const rowClass = (ok: boolean | undefined) => (ok === undefined ? "" : ok ? "rin
                 v-for="(c, i) in store.cues" :key="i" data-testid="cue" class="absolute top-0 h-full rounded-sm border border-line bg-panel-2 text-[10px] leading-[20px] text-fg/90 px-1 truncate"
                 :class="store.currentCue?.id === c.id && store.currentCue.start === c.start ? 'border-accent/70' : ''"
                 :style="{ left: c.start * pxPerMs + 'px', width: Math.max(1, (c.end - c.start) * pxPerMs - 1) + 'px' }" :title="c.text || 'Double-click to edit'"
-                @pointerdown.stop="store.select(CAPTIONS_SELECTION); store.playing = false; store.seek(xToMs($event.clientX))" @dblclick="editingCue = c.id"
+                @pointerdown.stop="store.select(CAPTIONS_SELECTION); store.playing = false; store.seek(xToMs($event.clientX))" @dblclick="editCue(c)"
               >
                 <input
-                  v-if="editingCue === c.id" v-focus data-testid="cue-text" aria-label="Caption text" :value="c.text" class="absolute inset-y-0 left-0 min-w-56 w-full bg-panel border border-accent rounded-sm px-1 text-fg z-30"
-                  @pointerdown.stop @keydown.stop @keydown.enter="commitCue(c.id, c.text, $event)" @keydown.escape="editingCue = null" @blur="commitCue(c.id, c.text, $event)"
+                  v-if="editingCue?.id === c.id" v-model="editingCue.text" v-focus data-testid="cue-text" aria-label="Caption text" class="absolute inset-y-0 left-0 min-w-56 w-full bg-panel border border-accent rounded-sm px-1 text-fg z-30"
+                  @pointerdown.stop @keydown.stop @keydown.enter="commitCue(c.id, c.text)" @keydown.escape="editingCue = null" @blur="commitCue(c.id, c.text)"
                 />
                 <template v-else>{{ c.text }}</template>
               </div>
